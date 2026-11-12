@@ -1,0 +1,2933 @@
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -48,14 +48,14 @@
+     "release": "npm version patch -m \"Release v%s\""
+   },
+   "dependencies": {
+-    "@earendil-works/pi-agent-core": "1.5.0",
+-    "@earendil-works/pi-ai": "1.5.0",
+-    "@earendil-works/pi-codemode": "1.5.0",
+-    "@earendil-works/pi-coding-agent": "1.5.0",
+-    "@earendil-works/pi-mcp": "1.5.0",
+-    "@earendil-works/pi-schema": "1.5.0",
+-    "@earendil-works/pi-telemetry": "1.5.0",
+-    "@earendil-works/pi-tui": "1.5.0",
++    "@earendil-works/pi-agent-core": "1.5.2",
++    "@earendil-works/pi-ai": "1.5.2",
++    "@earendil-works/pi-codemode": "1.5.2",
++    "@earendil-works/pi-coding-agent": "1.5.2",
++    "@earendil-works/pi-mcp": "1.5.2",
++    "@earendil-works/pi-schema": "1.5.2",
++    "@earendil-works/pi-telemetry": "1.5.2",
++    "@earendil-works/pi-tui": "1.5.2",
+     "@xterm/addon-fit": "0.11.0",
+     "@xterm/xterm": "6.0.0",
+     "js-yaml": "^5.2.3",
+diff --git a/app/api/sessions/[id]/terminal/route.ts b/app/api/sessions/[id]/terminal/route.ts
+new file mode 100644
+index 0000000..8bff70e
+--- /dev/null
++++ b/app/api/sessions/[id]/terminal/route.ts
+@@ -0,0 +1,58 @@
++import { NextResponse } from "next/server";
++import { realpath, stat } from "node:fs/promises";
++import { isAbsolute } from "node:path";
++import { SessionManager } from "@earendil-works/pi-coding-agent";
++import { resolveSessionPath, invalidateSessionManagerCache } from "@/lib/session-reader";
++import { getRpcSession, getRpcStartingSessionIds } from "@/lib/rpc-manager";
++import { hasActiveSessionLivenessProvider } from "@/lib/session-liveness";
++import { hasUnsettledSubagentRun } from "@/lib/subagent-runtime";
++import { readSubagentRun } from "@/lib/subagents";
++import { readWorkbotOrigin } from "@/lib/workbot-origin";
++import { terminalEnabled, terminalActive, terminalUrl, startTerminal } from "@/lib/workbot-terminal";
++
++type Context = { params: Promise<{ id: string }> };
++export const dynamic = "force-dynamic";
++export const runtime = "nodejs";
++
++export async function GET(_req: Request, { params }: Context) {
++  const { id } = await params;
++  if (!terminalEnabled()) return NextResponse.json({ enabled: false, active: false });
++  try {
++    return NextResponse.json({ enabled: true, active: await terminalActive(id), url: terminalUrl(id) });
++  } catch {
++    return NextResponse.json({ error: "无法查询终端状态，请稍后重试" }, { status: 503 });
++  }
++}
++
++export async function POST(_req: Request, { params }: Context) {
++  if (!terminalEnabled()) return NextResponse.json({ error: "独立终端未启用" }, { status: 403 });
++  const { id } = await params;
++  try {
++    const path = await resolveSessionPath(id);
++    if (!path) return NextResponse.json({ error: "会话不存在" }, { status: 404 });
++    const file = await realpath(path);
++    const manager = SessionManager.open(file);
++    const header = manager.getHeader();
++    if (header && readWorkbotOrigin(manager.getEntries(), header.id)) {
++      return NextResponse.json({ error: "请在 IM 中继续此会话" }, { status: 403 });
++    }
++    if (!header || header.id !== id || !isAbsolute(header.cwd) || !(await stat(header.cwd)).isDirectory()
++      || readSubagentRun(manager.getEntries().filter((entry) => entry.type === "custom"), id, file)) {
++      return NextResponse.json({ error: "只能打开已保存的普通会话" }, { status: 400 });
++    }
++    if (await terminalActive(id)) return NextResponse.json({ enabled: true, active: true, url: terminalUrl(id) });
++    const wrapper = getRpcSession(id);
++    if (getRpcStartingSessionIds().includes(id) || (wrapper && !wrapper.canDetachForTerminal())
++      || hasUnsettledSubagentRun(id) || hasActiveSessionLivenessProvider({ sessionId: id, sessionFile: path })) {
++      return NextResponse.json({ error: "请先结束 GUI 中的任务和后台工作" }, { status: 409 });
++    }
++    // One-time handoff only. No persistent ownership map or terminal event stream.
++    await wrapper?.shutdown();
++    invalidateSessionManagerCache(path);
++    await startTerminal(id, header.cwd, file);
++    return NextResponse.json({ enabled: true, active: true, url: terminalUrl(id) });
++  } catch (error) {
++    console.error("[workbot-terminal] open failed", error);
++    return NextResponse.json({ error: "终端启动失败，请检查 Web 日志" }, { status: 500 });
++  }
++}
+diff --git a/app/api/workbot-terminal/auth/route.ts b/app/api/workbot-terminal/auth/route.ts
+new file mode 100644
+index 0000000..a814b6a
+--- /dev/null
++++ b/app/api/workbot-terminal/auth/route.ts
+@@ -0,0 +1,12 @@
++import { terminalEnabled } from "@/lib/workbot-terminal";
++
++export const dynamic = "force-dynamic";
++
++// Caddy calls this through Next's /api middleware, with the original cookie,
++// Host, Origin and Fetch Metadata. Never issue a separate terminal credential.
++export function GET() {
++  return new Response(null, {
++    status: terminalEnabled() ? 204 : 403,
++    headers: { "Cache-Control": "no-store" },
++  });
++}
+diff --git a/app/layout.tsx b/app/layout.tsx
+index 5379356..4b19b8d 100644
+--- a/app/layout.tsx
++++ b/app/layout.tsx
+@@ -1,5 +1,5 @@
+ import type { Metadata, Viewport } from "next";
+-import { Noto_Sans_Mono } from "next/font/google";
++import localFont from "next/font/local";
+ import { PwaRegistration } from "@/components/PwaRegistration";
+ import { THEME_INIT_SCRIPT } from "@/lib/theme";
+ import "katex/dist/katex.min.css";
+@@ -8,8 +8,10 @@ import "./settings.css";
+ import "./sidebar.css";
+ import "./sidebar-menu.css";
+
+-const notoSansMono = Noto_Sans_Mono({
+-  subsets: ["latin", "cyrillic"],
++const notoSansMono = localFont({
++  src: "./fonts/NotoSansMono.woff2",
++  weight: "100 900",
++  style: "normal",
+   variable: "--font-noto-mono",
+   display: "swap",
+ });
+diff --git a/components/AppShell.tsx b/components/AppShell.tsx
+index 730f8d2..ea948f7 100644
+--- a/components/AppShell.tsx
++++ b/components/AppShell.tsx
+@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
+ import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+ import { SessionSidebar, type SelectSessionOptions, type SessionSidebarControl } from "./SessionSidebar";
+ import { ChatWindow } from "./ChatWindow";
++import { WorkbotTerminalAccess } from "./WorkbotTerminalAccess";
+ import { NewSessionContextBar, type NewSessionContextControl } from "./NewSessionContextBar";
+ import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
+ import { FileViewer } from "./FileViewer";
+@@ -2749,8 +2750,10 @@ export function AppShell() {
+         {/* Chat content */}
+         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
+           {showChat ? (
++            <WorkbotTerminalAccess key={sessionKey} session={selectedSession}
++              running={Boolean(selectedSession && runningSessionIds.has(selectedSession.id))}
++              onOpenFile={handleOpenLinkedFile}>
+             <ChatWindow
+-              key={sessionKey}
+               session={selectedSession}
+               searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
+               onSearchTargetHandled={handleSearchTargetHandled}
+@@ -2789,6 +2792,7 @@ export function AppShell() {
+               unlockAudio={unlockAudio}
+               holdAudio={holdAudio}
+             />
++            </WorkbotTerminalAccess>
+           ) : initialCwdStatus === "validating" ? (
+             <div
+               role="status"
+diff --git a/components/WorkbotTerminalAccess.test.mjs b/components/WorkbotTerminalAccess.test.mjs
+new file mode 100644
+index 0000000..821bb95
+--- /dev/null
++++ b/components/WorkbotTerminalAccess.test.mjs
+@@ -0,0 +1,279 @@
++import assert from "node:assert/strict";
++import { readFileSync } from "node:fs";
++import test from "node:test";
++import { mock } from "bun:test";
++import React from "react";
++import { renderToStaticMarkup } from "react-dom/server";
++import { Script, createContext } from "node:vm";
++import ts from "typescript";
++
++// Keep this process-local mock at the transcript boundary, not the access guard.
++const viewers = [];
++mock.module("./WorkbotTranscript", () => ({
++  WorkbotTranscript(props) {
++    viewers.push(props);
++    return React.createElement("div", { "data-read-only-transcript": true });
++  },
++}));
++const { WorkbotTerminalAccess } = await import("./WorkbotTerminalAccess.tsx");
++
++function render(sessionPath, origin) {
++  viewers.length = 0;
++  let mounted = false;
++  function Chat() {
++    mounted = true;
++    return React.createElement("textarea", { "aria-label": "Message" });
++  }
++  const html = renderToStaticMarkup(React.createElement(
++    WorkbotTerminalAccess,
++    { session: { id: "fixture", path: sessionPath, name: "Fixture", origin }, running: false, onOpenFile() {} },
++    React.createElement(Chat),
++  ));
++  return { html, mounted };
++}
++
++test("explicit IM origin uses the live read-only transcript regardless of file location", () => {
++  for (const [adapter, label] of [["feishu", "飞书"], ["wecom", "企业微信"], ["custom-adapter", "IM"]]) {
++    const { html, mounted } = render("/runtime/pi/sessions/--workspace--/chat.jsonl", { kind: "im", adapter });
++    assert.equal(mounted, false, adapter);
++    assert.doesNotMatch(html, /textarea|打开 TUI/);
++    assert.ok(html.includes(`${label}会话 · 仅供查看，请回到${label}回复。`));
++    assert.match(html, /data-read-only-transcript/);
++    assert.equal(viewers.length, 1);
++    assert.equal(viewers[0].sessionId, "fixture");
++    assert.equal(viewers[0].running, true);
++    assert.equal(viewers[0].pollMs, 10_000);
++  }
++});
++
++test("new sessions retain chat and normal Web sessions wait for terminal status", () => {
++  for (const path of [undefined, ""]) {
++    const { html, mounted } = render(path);
++    assert.equal(mounted, true);
++    assert.match(html, /textarea/);
++  }
++  for (const path of [
++    "/runtime/pi/sessions/--workspace--/chat.jsonl",
++    "/runtime/pi/sessions/im/chat.jsonl",
++  ]) {
++    const { html, mounted } = render(path);
++    assert.equal(mounted, false);
++    assert.equal(html, "", "ownership checks must not render a viewer or a visible loading notice");
++    assert.equal(viewers.length, 0);
++  }
++});
++
++test("the access guard wraps the whole chat rather than only its input", () => {
++  const source = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
++  assert.match(source, /<WorkbotTerminalAccess\b[^>]*>[\s\S]*?<ChatWindow\b[\s\S]*?<\/WorkbotTerminalAccess>/);
++});
++
++test("read-only transcripts use the same reactive font-size scope as GUI chat", async () => {
++  // Load the real viewer in isolation from the guard's module mock above.
++  const dependencies = {
++    react: React,
++    "./MessageView": { MessageView: () => null },
++    "./workbot-transcript-state": await import("./workbot-transcript-state.ts"),
++  };
++  const context = createContext({ exports: {}, require: (name) => dependencies[name], React });
++  new Script(ts.transpileModule(
++    readFileSync(new URL("./WorkbotTranscript.tsx", import.meta.url), "utf8"),
++    { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } },
++  ).outputText).runInContext(context);
++
++  for (const running of [true, false]) {
++    const html = renderToStaticMarkup(React.createElement(context.exports.WorkbotTranscript, {
++      sessionId: "fixture", running, onOpenFile() {},
++    }));
++    assert.match(html, /^<div class="chat-content"/);
++  }
++  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
++  assert.match(css, /\.chat-content\s*\{\s*--chat-font-size-offset:\s*calc\(var\(--chat-content-font-size, 14px\) - 14px\)/);
++});
++
++// Run the real guard with local hook slots, following the upstream effect tests.
++// Only React scheduling/browser events are replaced; requests and render decisions
++// still execute the component body. No DOM package or model connection is needed.
++const guardScript = new Script(ts.transpileModule(
++  readFileSync(new URL("./WorkbotTerminalAccess.tsx", import.meta.url), "utf8"),
++  { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } },
++).outputText);
++
++function mountGuard(fetch) {
++  const slots = [];
++  let cursor = 0;
++  let started = false;
++  let effect;
++  let cleanup;
++  const window = new EventTarget();
++  const document = Object.assign(new EventTarget(), { visibilityState: "visible" });
++  const react = {
++    ...React,
++    useState(initial) {
++      const index = cursor++;
++      if (!(index in slots)) slots[index] = initial;
++      return [slots[index], (value) => { slots[index] = typeof value === "function" ? value(slots[index]) : value; }];
++    },
++    useRef(initial) {
++      const index = cursor++;
++      return slots[index] ??= { current: initial };
++    },
++    useEffect(callback) { if (!started) effect = callback; },
++  };
++  const dependencies = {
++    react,
++    "react-dom": { flushSync: (callback) => callback() },
++    "./WorkbotTranscript": { WorkbotTranscript: () => React.createElement("div", { "data-read-only-transcript": true }) },
++  };
++  const context = createContext({
++    exports: {}, require: (name) => dependencies[name], React, fetch, AbortSignal,
++    window, document, setInterval() { return 1; }, clearInterval() {},
++  });
++  guardScript.runInContext(context);
++  const render = () => {
++    cursor = 0;
++    const element = context.exports.WorkbotTerminalAccess({
++      session: { id: "fixture", path: "/runtime/pi/sessions/web/chat.jsonl" },
++      running: false, onOpenFile() {}, children: React.createElement("textarea"),
++    });
++    return renderToStaticMarkup(element);
++  };
++  const html = render();
++  started = true;
++  cleanup = effect();
++  return {
++    html,
++    // Drain mocked requests/state updates, rather than sleeping for readiness.
++    async settle() { await new Promise(setImmediate); return render(); },
++    focus() { window.dispatchEvent(new Event("focus")); },
++    dispose() { cleanup(); },
++  };
++}
++
++test("read-only transcript polls only context pages, pauses when hidden and aborts on unmount", async () => {
++  const requests = [];
++  const effects = [];
++  let poll;
++  let cleared = false;
++  const document = { visibilityState: "visible" };
++  const dependencies = {
++    react: {
++      ...React,
++      useEffect: (effect) => effects.push(effect),
++      useLayoutEffect() {},
++      useState: (initial) => [initial, () => {}],
++      useRef: (current) => ({ current }),
++      useMemo: (compute) => compute(),
++      useCallback: (callback) => callback,
++    },
++    "./MessageView": { MessageView: () => null },
++    "./workbot-transcript-state": await import("./workbot-transcript-state.ts"),
++  };
++  const context = createContext({
++    exports: {}, require: (name) => dependencies[name], React, document, AbortController, URLSearchParams,
++    fetch: async (url, options) => {
++      requests.push({ url, options });
++      return Response.json({ context: { messages: [], entryIds: [], hasMore: false } });
++    },
++    setInterval(callback, ms) { assert.equal(ms, 10_000); poll = callback; return 1; },
++    clearInterval() { cleared = true; },
++  });
++  new Script(ts.transpileModule(
++    readFileSync(new URL("./WorkbotTranscript.tsx", import.meta.url), "utf8"),
++    { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } },
++  ).outputText).runInContext(context);
++  context.exports.WorkbotTranscript({ sessionId: "im/fixture", running: true, onOpenFile() {} });
++  const cleanups = effects.map((effect) => effect());
++  try {
++    await new Promise(setImmediate);
++    assert.equal(requests.length, 1);
++    document.visibilityState = "hidden";
++    poll();
++    assert.equal(requests.length, 1);
++    document.visibilityState = "visible";
++    poll();
++    await new Promise(setImmediate);
++    assert.equal(requests.length, 2);
++    for (const { url, options } of requests) {
++      assert.equal(url, "/api/sessions/im%2Ffixture/context?deferThinking=1&deferMedia=1&tail=100");
++      assert.equal(options.method, undefined, "only GET, never send a prompt or start an agent");
++    }
++  } finally { for (const cleanup of cleanups) cleanup?.(); }
++  assert.equal(cleared, true);
++  assert.equal(requests[0].options.signal.aborted, true);
++});
++
++test("read-only paging preserves older records and ignores stale pages after a branch change", async () => {
++  const { mergeTailPage, prependOlderPage, buildToolResultsMap } = await import("./workbot-transcript-state.ts");
++  const page = (ids, hasMore = true) => ({ messages: ids.map((id) => ({ role: "user", content: id })), entryIds: ids, oldestEntryId: ids[0], hasMore });
++  const current = page(["a", "b"]);
++  const merged = mergeTailPage(current, page(["b", "c"]));
++  assert.deepEqual(merged.entryIds, ["a", "b", "c"]);
++  assert.equal(merged.messages[1], current.messages[1]);
++  const earlier = prependOlderPage(merged, "a", page(["0"], false));
++  assert.deepEqual(earlier.entryIds, ["0", "a", "b", "c"]);
++  assert.equal(earlier.hasMore, false);
++  const switched = mergeTailPage(earlier, page(["x"]));
++  assert.deepEqual(switched.entryIds, ["x"]);
++  assert.equal(prependOlderPage(switched, "a", page(["old"])), switched);
++  const result = { role: "toolResult", toolCallId: "call", content: [] };
++  assert.equal(buildToolResultsMap([result]).get("call"), result);
++});
++
++const terminalUrl = `/tui/?arg=${"a".repeat(32)}`;
++
++test("idle GUI mounts only after both terminal detection and history refresh finish", async () => {
++  const terminal = Promise.withResolvers();
++  const records = Promise.withResolvers();
++  const requests = [];
++  const guard = mountGuard((url) => {
++    requests.push(url);
++    return url.endsWith("/terminal") ? terminal.promise : records.promise;
++  });
++  try {
++    assert.equal(guard.html, "");
++    terminal.resolve(Response.json({ enabled: true, active: false, url: terminalUrl }));
++    const refreshing = await guard.settle();
++    assert.deepEqual(requests, ["/api/sessions/fixture/terminal", "/api/sessions/fixture?force=1"]);
++    assert.equal(refreshing, "", "history refresh must also remain silent");
++    records.resolve(new Response("{}"));
++    const ready = await guard.settle();
++    assert.match(ready, /textarea/);
++    assert.doesNotMatch(ready, /data-read-only-transcript|正在检查会话状态/);
++  } finally { guard.dispose(); }
++});
++
++test("confirmed TUI ownership mounts the transcript directly without starting GUI", async () => {
++  const requests = [];
++  const guard = mountGuard(async (url) => {
++    requests.push(url);
++    return Response.json({ enabled: true, active: true, url: terminalUrl });
++  });
++  try {
++    assert.doesNotMatch(guard.html, /textarea|data-read-only-transcript/);
++    const ready = await guard.settle();
++    assert.match(ready, /此会话已在 TUI 中打开/);
++    assert.match(ready, /data-read-only-transcript/);
++    assert.doesNotMatch(ready, /textarea|正在检查会话状态/);
++    assert.deepEqual(requests, ["/api/sessions/fixture/terminal"]);
++  } finally { guard.dispose(); }
++});
++
++test("failed detection exposes retry without either viewer, then recovers on recheck", async () => {
++  let attempts = 0;
++  const guard = mountGuard(async () => {
++    if (++attempts === 1) throw new Error("状态检查失败");
++    return Response.json({ enabled: false, active: false });
++  });
++  try {
++    const failed = await guard.settle();
++    assert.match(failed, /状态检查失败/);
++    assert.match(failed, /重试检查/);
++    assert.doesNotMatch(failed, /textarea|data-read-only-transcript/);
++    guard.focus();
++    const recovered = await guard.settle();
++    assert.equal(attempts, 2);
++    assert.match(recovered, /textarea/);
++    assert.doesNotMatch(recovered, /data-read-only-transcript|状态检查失败|重试检查/);
++  } finally { guard.dispose(); }
++});
+diff --git a/components/WorkbotTerminalAccess.tsx b/components/WorkbotTerminalAccess.tsx
+new file mode 100644
+index 0000000..32441a8
+--- /dev/null
++++ b/components/WorkbotTerminalAccess.tsx
+@@ -0,0 +1,119 @@
++"use client";
++
++import { useEffect, useRef, useState, type ReactNode } from "react";
++import { flushSync } from "react-dom";
++import type { SessionInfo } from "@/lib/types";
++import { WorkbotTranscript } from "./WorkbotTranscript";
++
++type Status = { enabled: boolean; active: boolean; url?: string };
++
++/** A launcher and read-only notice, never a terminal renderer or process owner. */
++export function WorkbotTerminalAccess({ session, running, onOpenFile, children }: {
++  session: SessionInfo | null;
++  running: boolean;
++  onOpenFile: (path: string, page?: number) => void;
++  children: ReactNode;
++}) {
++  const isImSession = session?.origin?.kind === "im";
++  const channel = session?.origin?.adapter === "feishu" ? "飞书" : session?.origin?.adapter === "wecom" ? "企业微信" : "IM";
++  const eligible = Boolean(session?.path && !session.transient && session.relation?.kind !== "subagent" && !isImSession);
++  const [status, setStatus] = useState<Status | null>(null);
++  const [error, setError] = useState("");
++  const [opening, setOpening] = useState(false);
++  const busy = useRef(false);
++  const revision = useRef(0);
++  const refreshRecords = useRef(true);
++  const mounted = useRef(false);
++  const refresh = useRef<() => void>(() => {});
++  const url = `/api/sessions/${encodeURIComponent(session?.id ?? "")}/terminal`;
++
++  async function request(method: string): Promise<Status> {
++    const response = await fetch(url, { method, cache: "no-store", signal: AbortSignal.timeout(15_000) });
++    const value: unknown = await response.json();
++    if (!response.ok) throw new Error(value && typeof value === "object" && "error" in value && typeof value.error === "string" ? value.error : `HTTP ${response.status}`);
++    if (!value || typeof value !== "object" || !("enabled" in value) || typeof value.enabled !== "boolean"
++      || !("active" in value) || typeof value.active !== "boolean"
++      || (value.enabled && (!("url" in value) || typeof value.url !== "string" || !/^\/tui\/\?arg=[a-f0-9]{32}$/.test(value.url)))) throw new Error("无效的终端状态");
++    return value as Status;
++  }
++
++  useEffect(() => {
++    mounted.current = true;
++    let cancelled = false;
++    let checking = false;
++    const check = async () => {
++      if (!eligible || cancelled || checking || busy.current) return;
++      checking = true;
++      const current = revision.current;
++      try {
++        const next = await request("GET");
++        if (next.enabled && !next.active && refreshRecords.current) {
++          const records = await fetch(`/api/sessions/${encodeURIComponent(session!.id)}?force=1`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
++          if (!records.ok) throw new Error("无法刷新会话记录，请重试");
++        }
++        if (!cancelled && !busy.current && current === revision.current) { refreshRecords.current = next.active; setStatus(next); setError(""); }
++      } catch (reason) {
++        if (!cancelled && current === revision.current) { setStatus(null); setError(reason instanceof Error ? reason.message : String(reason)); }
++      } finally { checking = false; }
++    };
++    refresh.current = () => void check();
++    void check();
++    const visible = () => { if (document.visibilityState === "visible") void check(); };
++    const timer = setInterval(visible, 10_000);
++    window.addEventListener("focus", visible);
++    document.addEventListener("visibilitychange", visible);
++    return () => {
++      cancelled = true;
++      mounted.current = false;
++      clearInterval(timer);
++      window.removeEventListener("focus", visible);
++      document.removeEventListener("visibilitychange", visible);
++    };
++    // The parent keys this component by session; request only depends on its URL.
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [url, eligible]);
++
++  async function open() {
++    if (busy.current || running) return;
++    // Open synchronously under the user's click, before asynchronous handoff.
++    const tab = window.open("about:blank", "_blank");
++    if (!tab) { setError("浏览器阻止了新标签页，请允许弹出窗口后重试"); return; }
++    tab.opener = null;
++    busy.current = true;
++    revision.current++;
++    flushSync(() => { setOpening(true); setError(""); });
++    try {
++      const next = await request("POST");
++      if (!next.active || !next.url) throw new Error("终端未就绪");
++      tab.location.replace(next.url);
++      if (mounted.current) { refreshRecords.current = true; setStatus(next); }
++    } catch (reason) {
++      tab.close();
++      // A lost response may still have started Pi. Recheck before remounting GUI.
++      if (mounted.current) { setStatus(null); setError(reason instanceof Error ? reason.message : String(reason)); }
++    } finally {
++      busy.current = false;
++      if (mounted.current) { setOpening(false); refresh.current(); }
++    }
++  }
++
++  if (!eligible && !isImSession) return children;
++  // Keep ownership checks silent. Mounting either viewer early causes a second
++  // history load and a visible layout swap, even if only shown behind a notice.
++  const pending = !isImSession && (opening || !status);
++  const readOnly = isImSession || status?.active;
++  if (pending && !error) return null;
++  return (
++    <section style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
++      {(isImSession || status?.enabled || opening) && <div role="note" style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", fontSize: 12, color: "var(--text-muted)" }}>
++        {isImSession ? `${channel}会话 · 仅供查看，请回到${channel}回复。` : status?.active ? "此会话已在 TUI 中打开，当前页面仅供查看。" : opening ? "正在打开独立终端…" : null}
++        {!isImSession && (status?.active && status.url ? <a href={status.url} target="_blank" rel="noopener noreferrer">打开 TUI ↗</a>
++          : status?.enabled && <button type="button" disabled={opening || running} onClick={() => void open()}>打开 TUI ↗</button>)}
++      </div>}
++      {error && <div role="alert" style={{ padding: "8px 12px" }}>{error} <button type="button" onClick={() => refresh.current()}>重试检查</button></div>}
++      <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
++        {pending ? null : readOnly && session ? <WorkbotTranscript key={session.id} sessionId={session.id} cwd={session.cwd} running={isImSession || Boolean(status?.active)} onOpenFile={onOpenFile} pollMs={10_000} /> : children}
++      </div>
++    </section>
++  );
++}
+diff --git a/lib/default-cwd.ts b/lib/default-cwd.ts
+index e4abacb..e4dd54e 100644
+--- a/lib/default-cwd.ts
++++ b/lib/default-cwd.ts
+@@ -15,5 +15,5 @@ export function localDateStamp(now = new Date()): string {
+ }
+
+ export function defaultCwdPath(now = new Date(), home = homedir()): string {
+-  return path.join(home, DEFAULT_CWD_PARENT, localDateStamp(now));
++  return process.env.PI_WEB_DEFAULT_CWD || path.join(home, DEFAULT_CWD_PARENT, localDateStamp(now));
+ }
+diff --git a/lib/node-cli.ts b/lib/node-cli.ts
+index 0301dba..c1ae301 100644
+--- a/lib/node-cli.ts
++++ b/lib/node-cli.ts
+@@ -53,12 +53,21 @@ export interface NodeCliInvocation {
+  * `execFile`-spawnable invocation of a Node.js CLI, never routed through a
+  * shell. Falls back to the bare command name when no bundled CLI script is
+  * found, so behavior is unchanged on installs that ship none.
++ *
++ * Under Bun those bare names do not exist, so the two read-only commands Pi Web
++ * shells out to are mapped onto their Bun equivalents: `bun x` replaces npx and
++ * `bun pm view` emits npm's `view ... version --json`. Installs are left alone —
++ * `bun pm install` does not exist, so the SDK keeps using npm for those.
+  */
+ export function nodeCliInvocation(
+   name: NodeCliName,
+   args: string[],
+   options: NodeCliLookupOptions = {},
+ ): NodeCliInvocation {
++  if ("bun" in process.versions) {
++    if (name === "npx") return { command: execPath, args: ["x", ...args] };
++    if (name === "npm" && args[0] === "view") return { command: execPath, args: ["pm", ...args] };
++  }
+   const script = findNodeCliScript(name, options);
+   return script
+     ? { command: execPath, args: [script, ...args] }
+diff --git a/lib/pi-sdk-internals.ts b/lib/pi-sdk-internals.ts
+index a36a488..c92e6bc 100644
+--- a/lib/pi-sdk-internals.ts
++++ b/lib/pi-sdk-internals.ts
+@@ -8,9 +8,8 @@ import {
+   type McpServerEntry,
+   type McpTransportFactory,
+ } from "@earendil-works/pi-coding-agent";
+-import { readFileSync, realpathSync } from "node:fs";
+-import { findPackageJSON } from "node:module";
+-import { join } from "node:path";
++import { readFileSync, realpathSync, statSync } from "node:fs";
++import { dirname, join } from "node:path";
+ import { pathToFileURL } from "node:url";
+
+ // MCP support the SDK ships but its package does not export (ADR 0006): the
+@@ -288,14 +287,44 @@ function packageImportEntry(manifest: unknown): string | undefined {
+   return conditionalTarget(isRecord(exports) && "." in exports ? exports["."] : exports) ?? undefined;
+ }
+
++/**
++ * The package.json of a dependency, as Node's resolver finds it: the
++ * `node_modules` of the importer's folder, then of every folder above it.
++ *
++ * `findPackageJSON()` from `node:module` is Node 22.14+ only and Bun does not
++ * implement it, and importing it there fails the whole module (named exports
++ * of `node:module` are checked at link time), turning every MCP feature off
++ * with `internals-unavailable`. The walk is short and plain, so both runtimes
++ * share it.
++ */
++function findPackageManifest(spec: string, fromFile: string): string | undefined {
++  // A scoped name keeps its scope folder; anything after the package's own
++  // path would be a subpath, which nothing here resolves.
++  const name = spec.split("/").slice(0, spec.startsWith("@") ? 2 : 1).join("/");
++  let dir = dirname(fromFile);
++  for (;;) {
++    const candidate = join(dir, "node_modules", name, "package.json");
++    try {
++      // statSync, not existsSync: a folder or a link to one where the
++      // manifest belongs is the same nothing to read.
++      if (statSync(candidate).isFile()) return candidate;
++    } catch {
++      // Missing or unreadable here: keep walking, as Node does.
++    }
++    const parent = dirname(dir);
++    if (parent === dir) return undefined;
++    dir = parent;
++  }
++}
++
+ /**
+  * pi-mcp is a dependency of the SDK, not of pi-web, so it is resolved from the
+  * SDK file that imports it: the copy runtime.js uses, whether npm nested it
+  * under the SDK or hoisted it.
+  */
+ function resolveMcpClientEntry(packageDir: string): string {
+-  const importer = pathToFileURL(join(packageDir, SDK_MODULES.mcpRuntime)).href;
+-  const manifestPath = findPackageJSON(MCP_PACKAGE, importer);
++  const importer = join(packageDir, SDK_MODULES.mcpRuntime);
++  const manifestPath = findPackageManifest(MCP_PACKAGE, importer);
+   if (!manifestPath) throw new Error(`cannot resolve ${MCP_PACKAGE}`);
+   const entry = packageImportEntry(JSON.parse(readFileSync(manifestPath, "utf8")));
+   if (!entry) throw new Error(`${manifestPath} declares no import entry`);
+@@ -305,7 +334,7 @@ function resolveMcpClientEntry(packageDir: string): string {
+ function resolvedSdkPackageDir(cwd: string): string {
+   // Next.js runs the server with the project as cwd, and resolves externals
+   // from its build output inside the project, so both find the same package.
+-  const manifestPath = findPackageJSON(SDK_PACKAGE, pathToFileURL(join(cwd, "package.json")).href);
++  const manifestPath = findPackageManifest(SDK_PACKAGE, join(cwd, "package.json"));
+   if (!manifestPath) throw new Error(`cannot resolve ${SDK_PACKAGE} from ${cwd}`);
+   return realpathSync(join(manifestPath, ".."));
+ }
+diff --git a/lib/rpc-manager.ts b/lib/rpc-manager.ts
+index 12a1ce5..d2f7761 100644
+--- a/lib/rpc-manager.ts
++++ b/lib/rpc-manager.ts
+@@ -7,6 +7,7 @@ import { resolve } from "path";
+ import { isDeepStrictEqual } from "util";
+ import { validateAgentImages } from "./image-attachments";
+ import { cwdMissingError } from "./missing-cwd";
++import { readWorkbotOrigin } from "./workbot-origin";
+ import { invalidateModelsCache } from "./models-cache";
+ import { invalidateModelRuntimeWithExtensions } from "./model-runtime";
+ import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
+@@ -464,6 +465,11 @@ export class AgentSessionWrapper {
+     return this._alive && (this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
+   }
+
++  canDetachForTerminal(): boolean {
++    return this.isAlive() && !this.isRunning() && this.activeMutatingCommands === 0
++      && (!this.extensionBindingPromise || this.extensionsBound);
++  }
++
+   /**
+    * True while an extension's blocking dialog is unanswered: select, confirm,
+    * input, editor, or a custom overlay still open. The run is parked on a promise
+@@ -2866,6 +2872,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
+
+     sessions.push({
+       path: sessionFile ?? "",
++      origin: readWorkbotOrigin(entries, header?.id ?? session.sessionId),
+       id: header?.id ?? session.sessionId,
+       cwd: header?.cwd ?? session.cwd,
+       name: manager.getSessionName(),
+diff --git a/lib/terminal-bun-pty.ts b/lib/terminal-bun-pty.ts
+new file mode 100644
+index 0000000..89616bf
+--- /dev/null
++++ b/lib/terminal-bun-pty.ts
+@@ -0,0 +1,159 @@
++/**
++ * A node-pty-compatible terminal backend for Bun, built on Bun's native PTY
++ * support (the `terminal` option of `Bun.spawn`, see
++ * https://bun.com/docs/runtime/child-process#terminal-pty-support).
++ *
++ * Why this exists: node-pty's native addon cannot keep the pty master fd alive
++ * under Bun — the fd is closed right after `spawn()`, so the child reads EOF on
++ * stdin and an interactive shell exits before it can print a prompt
++ * (agegr/pi-web#745, cf. oven-sh/bun#7362). Bun's own terminal support owns the
++ * master fd for the process's lifetime, so write, resize and exit all behave
++ * the way node-pty's do, with no polling reader.
++ *
++ * Only the surface `lib/terminal-manager.ts` drives is implemented — spawn,
++ * `onData`, `onExit`, `write`, `resize`, `kill` and `pid` — so the manager is
++ * unchanged apart from which backend loads. Node.js and Windows keep using
++ * node-pty. Zero extra dependencies.
++ */
++
++/** What a backend's `spawn` receives from the terminal manager. */
++export interface PtySpawnOptions {
++  name: string;
++  cols: number;
++  rows: number;
++  cwd: string;
++  env: Record<string, string>;
++}
++
++/** The subset of node-pty's `IPty` the terminal manager uses. */
++export interface PtyProcess {
++  readonly pid: number;
++  onData(listener: (data: string) => void): void;
++  onExit(listener: (event: { exitCode: number }) => void): void;
++  write(data: string): void;
++  resize(cols: number, rows: number): void;
++  kill(signal?: string): void;
++}
++
++export type PtySpawn = (file: string, args: string[], options: PtySpawnOptions) => PtyProcess;
++
++// The types below mirror the Spawn reference in
++// https://bun.com/docs/runtime/child-process, trimmed to what this backend
++// uses. The repo has no `@types/bun` dependency; only the terminal backend
++// touches these globals.
++interface BunTerminalOptions {
++  cols?: number;
++  rows?: number;
++  /** Terminal type for PTY configuration; `TERM` itself travels in `env`. */
++  name?: string;
++  data?: (terminal: BunTerminal, data: Uint8Array<ArrayBuffer>) => void;
++}
++
++interface BunTerminal {
++  readonly closed: boolean;
++  write(data: string | BufferSource): number;
++  resize(cols: number, rows: number): void;
++  setRawMode(enabled: boolean): void;
++  /** Keep the event loop alive while the terminal is open. */
++  ref(): void;
++  unref(): void;
++  close(): void;
++}
++
++interface BunSubprocess {
++  readonly terminal: BunTerminal | undefined;
++  readonly pid: number;
++  /** Resolves with the process's exit code, including 128+signal conventions. */
++  readonly exited: Promise<number>;
++  readonly exitCode: number | null;
++  readonly signalCode: NodeJS.Signals | number | null;
++  readonly killed: boolean;
++  kill(exitCode?: number | NodeJS.Signals): void;
++  ref(): void;
++  unref(): void;
++}
++
++interface BunSpawnOptions {
++  cwd?: string;
++  env?: Record<string, string | undefined>;
++  terminal?: BunTerminalOptions;
++}
++
++interface BunGlobal {
++  spawn(command: string[], options?: BunSpawnOptions): BunSubprocess;
++  spawn(options: { cmd: string[] } & BunSpawnOptions): BunSubprocess;
++}
++
++declare global {
++  var Bun: BunGlobal | undefined;
++}
++
++export function spawnBunPty(file: string, args: string[], options: PtySpawnOptions): PtyProcess {
++  if (typeof Bun === "undefined") {
++    throw new Error("The Bun terminal backend requires the Bun runtime");
++  }
++  // Streaming decode, so a multi-byte character split across two reads still
++  // arrives as one character — the same guarantee node-pty gets from its
++  // `setEncoding("utf8")` socket.
++  const decoder = new TextDecoder();
++  const dataListeners = new Set<(data: string) => void>();
++  const exitListeners = new Set<(event: { exitCode: number }) => void>();
++  let exitEvent: { exitCode: number } | null = null;
++
++  const subprocess = Bun.spawn([file, ...args], {
++    cwd: options.cwd,
++    // Replaces the parent environment, exactly like node-pty's env option.
++    env: options.env,
++    terminal: {
++      name: options.name,
++      cols: options.cols,
++      rows: options.rows,
++      data: (_terminal, output) => {
++        const text = decoder.decode(output, { stream: true });
++        if (!text) return;
++        for (const listener of [...dataListeners]) listener(text);
++      },
++    },
++  });
++
++  const terminal = subprocess.terminal;
++  if (!terminal) {
++    throw new Error(`Bun could not allocate a terminal for ${file}`);
++  }
++  // node-pty's read stream holds its fd the same way for the shell's lifetime.
++  terminal.ref();
++
++  const emitExit = (exitCode: number): void => {
++    if (exitEvent) return;
++    exitEvent = { exitCode };
++    for (const listener of [...exitListeners]) listener(exitEvent);
++  };
++  subprocess.exited
++    .then((exitCode) => emitExit(exitCode))
++    .catch(() => emitExit(subprocess.exitCode ?? 0));
++
++  return {
++    pid: subprocess.pid,
++    onData(listener) {
++      dataListeners.add(listener);
++    },
++    onExit(listener) {
++      // The exit promise settles as a microtask, but replaying a settled exit
++      // also covers a shell that died while spawn() was still running.
++      if (exitEvent) listener(exitEvent);
++      else exitListeners.add(listener);
++    },
++    write(data) {
++      terminal.write(data);
++    },
++    resize(cols, rows) {
++      terminal.resize(cols, rows);
++    },
++    kill(signal) {
++      // node-pty's default signal is SIGHUP; the manager escalates to SIGKILL.
++      // node-pty types signals as plain strings, Bun as NodeJS.Signals; the
++      // manager only ever passes "SIGKILL" or nothing.
++      subprocess.kill((signal ?? "SIGHUP") as NodeJS.Signals);
++    },
++  };
++}
+diff --git a/lib/terminal-manager.ts b/lib/terminal-manager.ts
+index d4ea56f..50b80f2 100644
+--- a/lib/terminal-manager.ts
++++ b/lib/terminal-manager.ts
+@@ -1,9 +1,11 @@
+ import { randomUUID } from "crypto";
+ import { homedir } from "os";
+-import type { IPty } from "node-pty";
++import type { PtyProcess, PtySpawn } from "./terminal-bun-pty";
+ import { getPowerShellConfig } from "@earendil-works/pi-coding-agent";
+ import { samePath } from "./paths";
+ import type { DebugServerGlobal } from "./debug-types";
++import type { TerminalTheme } from "./terminal-theme";
++import { createTerminalThemeTracker, terminalThemeReport } from "./workbot-terminal-theme";
+
+ export type TerminalEvent =
+   | { type: "output"; data: string; offset: number; reset?: boolean }
+@@ -13,10 +15,11 @@ export type TerminalEvent =
+ type TerminalListener = (event: TerminalEvent) => void;
+
+ interface TerminalRecord {
+-  pty: IPty;
++  pty: PtyProcess;
+   cwd: string;
+   listeners: Set<TerminalListener>;
+   backlog: string;
++  themeTracker: ReturnType<typeof createTerminalThemeTracker>;
+   offset: number;
+   exited: boolean;
+   exitCode: number | null;
+@@ -98,11 +101,13 @@ export function createTerminal(cwd: string, cols: number, rows: number, id: stri
+     if (!samePath(existing.cwd, cwd)) throw new Error("Terminal belongs to a different workspace");
+     return id;
+   }
+-  let spawn: typeof import("node-pty").spawn;
++  let spawn: PtySpawn;
+   try {
+-    // Load inside creation so native module failures reach the API's JSON error handler.
++    // Bun 原生 PTY 来自 brynne8/pi-web-bun 的 77f81ec，不使用旧轮询实现。
+     // eslint-disable-next-line @typescript-eslint/no-require-imports
+-    ({ spawn } = require("node-pty") as typeof import("node-pty"));
++    spawn = typeof Bun !== "undefined" && process.platform !== "win32"
++      ? (require("./terminal-bun-pty") as typeof import("./terminal-bun-pty")).spawnBunPty
++      : (require("node-pty") as typeof import("node-pty")).spawn as unknown as PtySpawn;
+   } catch (error) {
+     throw new Error(
+       `Cannot load the node-pty native terminal module for ${process.platform}-${process.arch}. ` +
+@@ -126,6 +131,7 @@ export function createTerminal(cwd: string, cols: number, rows: number, id: stri
+     cwd,
+     listeners: new Set(),
+     backlog: "",
++    themeTracker: createTerminalThemeTracker(),
+     offset: 0,
+     exited: false,
+     exitCode: null,
+@@ -137,6 +143,7 @@ export function createTerminal(cwd: string, cols: number, rows: number, id: stri
+   scheduleCleanup(id, record);
+
+   pty.onData((data) => {
++    record.themeTracker.write(data);
+     record.backlog = (record.backlog + data).slice(-MAX_BACKLOG);
+     record.offset += data.length;
+     emit(record, { type: "output", data, offset: record.offset });
+@@ -221,6 +228,16 @@ export function writeTerminal(id: string, data: string): boolean {
+   return true;
+ }
+
++export function syncTerminalTheme(id: string, theme: TerminalTheme): boolean {
++  const record = registry().get(id);
++  if (!record || record.exited) return false;
++  // Only applications that requested native appearance reports may receive input.
++  // Keep this state on the server: refresh can replay an old enable after Pi exited,
++  // or the enable may have already rolled out of the bounded history buffer.
++  if (record.themeTracker.enabled) record.pty.write(terminalThemeReport(theme));
++  return true;
++}
++
+ export function resizeTerminal(id: string, cols: number, rows: number): boolean {
+   const record = registry().get(id);
+   if (!record || record.exited) return false;
+diff --git a/lib/workbot-terminal.ts b/lib/workbot-terminal.ts
+new file mode 100644
+index 0000000..6db72f3
+--- /dev/null
++++ b/lib/workbot-terminal.ts
+@@ -0,0 +1,106 @@
++import { execFile } from "node:child_process";
++import { createHash } from "node:crypto";
++import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
++import { promisify } from "node:util";
++import { dirname, join } from "node:path";
++import { getPackageDir } from "@earendil-works/pi-coding-agent";
++import { TERMINAL_XTERM_THEMES, type TerminalTheme } from "./terminal-theme";
++import { terminalThemeReport } from "./workbot-terminal-theme";
++
++const exec = promisify(execFile);
++
++export function terminalEnabled(): boolean {
++  return process.env.WORKBOT_TUI_ENABLED === "1" && Boolean(process.env.PI_WEB_PASSWORD?.trim())
++    && Boolean(process.env.WORKBOT_TMUX_SOCKET && process.env.WORKBOT_TMUX_CONFIG);
++}
++
++export function terminalKey(id: string): string {
++  return createHash("sha256").update(id).digest("hex").slice(0, 32);
++}
++
++export function terminalUrl(id: string): string {
++  return `/tui/?arg=${terminalKey(id)}`;
++}
++
++async function tmux(args: string[]) {
++  if (!terminalEnabled()) throw new Error("独立终端未启用");
++  const { PI_WEB_PASSWORD: _password, ...env } = process.env;
++  return exec("tmux", ["-S", process.env.WORKBOT_TMUX_SOCKET!, "-f", process.env.WORKBOT_TMUX_CONFIG!, ...args], {
++    timeout: 10_000, maxBuffer: 64 * 1024, env,
++  });
++}
++
++export async function terminalActive(id: string): Promise<boolean> {
++  try {
++    await tmux(["has-session", "-t", `=pi-${terminalKey(id)}`]);
++    return true;
++  } catch (error) {
++    // A missing session/server is normal. Permission and executable failures
++    // must not silently make an occupied conversation writable again.
++    if (error && typeof error === "object" && "code" in error && error.code === 1
++      && "stderr" in error && typeof error.stderr === "string"
++      && /can't find session|no server running|No such file or directory|Connection refused/.test(error.stderr)) return false;
++    throw error;
++  }
++}
++
++/** Update what Pi's native OSC queries see, then ask its automatic theme to repaint. */
++export async function syncTerminalTheme(key: string, theme: TerminalTheme): Promise<void> {
++  if (!/^[a-f0-9]{32}$/.test(key) || (theme !== "dark" && theme !== "light"))
++    throw new Error("无效的终端主题请求");
++  const colors = TERMINAL_XTERM_THEMES[theme];
++  // Target only the managed Pi pane, never tmux's currently selected session/pane.
++  const target = `=pi-${key}:0.0`;
++  const { stdout } = await tmux([
++    "select-pane", "-t", target, "-P", `fg=${colors.foreground},bg=${colors.background}`,
++    ";", "display-message", "-p", "-t", target, "#{pane_tty}",
++  ]);
++  // A WebSocket can be ready before Pi starts. Never inject a report while the
++  // TTY still echoes input. Colours are already set for Pi's initial OSC query.
++  const { stdout: modes } = await exec("stty", [process.platform === "darwin" ? "-f" : "-F", stdout.trim(), "-a"], {
++    timeout: 10_000, env: { PATH: process.env.PATH, NODE_ENV: process.env.NODE_ENV, LC_ALL: "C" },
++  });
++  if (/(?:^|\s)-echo(?:\s|;|$)/.test(modes) && /(?:^|\s)-icanon(?:\s|;|$)/.test(modes))
++    await tmux(["send-keys", "-t", target, "-l", terminalThemeReport(theme)]);
++}
++
++export async function startTerminal(id: string, cwd: string, file: string): Promise<void> {
++  if (await terminalActive(id)) return;
++  const launcher = process.env.WORKBOT_TUI_LAUNCHER;
++  if (!launcher) throw new Error("缺少 TUI 启动器");
++  const directory = await mkdtemp(join(dirname(process.env.WORKBOT_TMUX_SOCKET!), "tui-launch-"));
++  const snapshot = join(directory, "env.json");
++  try {
++    // tmux retains its first server environment. Hand each new pane a fresh
++    // snapshot without putting credentials in argv or leaving a supervisor.
++    const { PI_WEB_PASSWORD: _password, ...env } = process.env;
++    await writeFile(snapshot, JSON.stringify(env), { mode: 0o600, flag: "wx" });
++    try {
++      // Multiple argv elements bypass tmux's single-string shell-command mode.
++      await tmux(["new-session", "-d", "-s", `pi-${terminalKey(id)}`, "-c", cwd,
++        "--", process.execPath, launcher, snapshot,
++        join(getPackageDir(), "dist/bundle/cli.js"), file]);
++    } catch (error) {
++      // Only an atomic name collision may reuse another request's process.
++      if (error && typeof error === "object" && "code" in error && error.code === 1
++        && "stderr" in error && typeof error.stderr === "string"
++        && error.stderr.includes("duplicate session:") && await terminalActive(id)) return;
++      throw error;
++    }
++    // The launcher unlinks the snapshot before execve. Bound its lifetime even
++    // when the launcher fails to start; never retain credentials after failure.
++    const deadline = Date.now() + 10_000;
++    while (true) {
++      try {
++        await access(snapshot);
++      } catch (error) {
++        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") break;
++        throw error;
++      }
++      if (Date.now() >= deadline) throw new Error("TUI 启动器未读取运行环境");
++      await new Promise((resolve) => setTimeout(resolve, 25));
++    }
++  } finally {
++    await rm(directory, { recursive: true, force: true });
++  }
++}
+diff --git a/components/WorkbotTui.tsx b/components/WorkbotTui.tsx
+new file mode 100644
+index 0000000..0870db8
+--- /dev/null
++++ b/components/WorkbotTui.tsx
+@@ -0,0 +1,243 @@
++"use client";
++
++import { createRoot } from 'react-dom/client'
++import { useCallback, useEffect, useRef, useState } from 'react'
++import { Terminal } from '@xterm/xterm'
++import { FitAddon } from '@xterm/addon-fit'
++import { I18nProvider, useI18n } from '@/hooks/useI18n'
++import { useViewportHeight } from '@/hooks/useViewportHeight'
++import {
++  CHAT_CONTENT_FONT_SIZE_MAX,
++  CHAT_CONTENT_FONT_SIZE_MIN,
++  CHAT_CONTENT_FONT_SIZE_STORAGE_KEY,
++  clampChatContentFontSize,
++  terminalFontSize,
++  useChatAppearance,
++} from '@/hooks/useChatAppearance'
++import { subscribeFontPreferences, useFontPreferences } from '@/hooks/useFontPreferences'
++import { setTerminalTheme, useTerminalTheme } from '@/hooks/useTerminalTheme'
++import { readFontWeight } from '@/lib/font-preferences'
++import { TERMINAL_XTERM_THEMES } from '@/lib/terminal-theme'
++import {
++  applyTerminalModifiers,
++  NO_TERMINAL_MODIFIERS,
++  terminalExtraKeySequence,
++  type TerminalExtraKey,
++  type TerminalModifier,
++} from '@/lib/terminal-extra-keys'
++import { TerminalExtraKeys, useTerminalExtraKeysVisible } from '@/components/TerminalExtraKeys'
++import { connectTtyd } from '@/lib/workbot-ttyd'
++import { attachTerminalTouchScroll } from '@/lib/workbot-terminal-touch'
++import { attachTerminalInput } from '@/lib/workbot-terminal-input'
++import { createTerminalThemeSync } from '@/lib/workbot-terminal-theme'
++import '@xterm/xterm/css/xterm.css'
++
++declare global {
++  interface Window {
++    term?: Terminal & { fit(): void }
++  }
++}
++
++function Tui() {
++  useViewportHeight()
++  useFontPreferences()
++  const { t } = useI18n()
++  const { fontSize, setFontSize } = useChatAppearance()
++  const theme = useTerminalTheme()
++  const extraKeys = useTerminalExtraKeysVisible()
++  const container = useRef<HTMLDivElement>(null)
++  const terminalRef = useRef<Terminal | null>(null)
++  const connection = useRef<ReturnType<typeof connectTtyd> | null>(null)
++  const refit = useRef(() => {})
++  const themeSyncRef = useRef<ReturnType<typeof createTerminalThemeSync> | null>(null)
++  const appearance = useRef({ fontSize, theme })
++  appearance.current = { fontSize, theme }
++  const [status, setStatus] = useState<'connecting' | 'ready' | 'exited' | 'error'>('connecting')
++  const [error, setError] = useState('')
++  const [modifiers, setModifiers] = useState(NO_TERMINAL_MODIFIERS)
++  const modifiersRef = useRef(modifiers)
++
++  const consumeModifiers = useCallback(() => {
++    const current = modifiersRef.current
++    if (current.ctrl || current.alt) {
++      modifiersRef.current = NO_TERMINAL_MODIFIERS
++      setModifiers(NO_TERMINAL_MODIFIERS)
++    }
++    return current
++  }, [])
++
++  useEffect(() => {
++    const host = container.current!
++    let disposed = false
++    let frame = 0
++    const readFont = () => {
++      const style = getComputedStyle(host)
++      return {
++        fontFamily: style.getPropertyValue('--font-mono').trim() || 'monospace',
++        fontWeight: readFontWeight(style.getPropertyValue('--font-mono-weight')),
++      }
++    }
++    const terminal = new Terminal({
++      ...readFont(),
++      fontSize: terminalFontSize(appearance.current.fontSize),
++      lineHeight: 1.25,
++      cursorBlink: true,
++      // xterm's screen-reader mode bypasses insertText from virtual keyboards/emoji.
++      screenReaderMode: false,
++      disableStdin: true,
++      // Pi/tmux own history, not a second browser scrollback buffer.
++      scrollback: 0,
++      theme: TERMINAL_XTERM_THEMES[appearance.current.theme],
++    })
++    terminalRef.current = terminal
++    const fit = new FitAddon()
++    terminal.loadAddon(fit)
++    terminal.open(host)
++    const detachTouchScroll = attachTerminalTouchScroll(terminal)
++    const detachInput = attachTerminalInput(terminal)
++    const fitAndResize = () => {
++      if (!disposed && host.offsetWidth && host.offsetHeight) fit.fit()
++    }
++    window.term = Object.assign(terminal, { fit: fitAndResize })
++    refit.current = fitAndResize
++    const scheduleFit = () => {
++      cancelAnimationFrame(frame)
++      frame = requestAnimationFrame(fitAndResize)
++    }
++    const observer = new ResizeObserver(scheduleFit)
++    observer.observe(host)
++    const unsubscribeFonts = subscribeFontPreferences(() => {
++      Object.assign(terminal.options, readFont())
++      scheduleFit()
++    })
++    void document.fonts.ready.then(scheduleFit)
++    document.fonts.addEventListener('loadingdone', scheduleFit)
++    terminal.attachCustomKeyEventHandler((event) => {
++      if (event.type !== 'keydown') return true
++      const key = event.key.toLowerCase()
++      if ((event.ctrlKey || event.metaKey) && key === 'v') return false
++      if ((event.ctrlKey || event.metaKey) && key === 'c' && terminal.hasSelection()) return false
++      return true
++    })
++    // Preserve ttyd's OSC 52 write support. Never answer clipboard-read queries.
++    const clipboard = terminal.parser.registerOscHandler(52, (data) => {
++      const separator = data.indexOf(';')
++      if (separator < 0) return false
++      const target = data.slice(0, separator)
++      const encoded = data.slice(separator + 1)
++      if (encoded === '?' || !target.includes('c')) return true
++      try {
++        if (encoded.length > 1_000_000) throw new Error('复制内容过长')
++        if (!document.hasFocus() || !navigator.clipboard?.writeText)
++          throw new Error('复制需要 HTTPS 或 localhost，并保持终端页面在前台')
++        const text = new TextDecoder().decode(Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)))
++        void navigator.clipboard.writeText(text).catch(() => setError('复制失败，请允许浏览器剪贴板权限'))
++      } catch (reason) {
++        setError(reason instanceof Error ? reason.message : String(reason))
++      }
++      return true
++    })
++    fitAndResize()
++    const themeSync = createTerminalThemeSync(terminal, appearance.current.theme, async (theme) => {
++      const key = new URLSearchParams(window.location.search).get('arg')
++      const response = await fetch('/api/workbot-terminal/theme', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ key, theme }),
++        signal: AbortSignal.timeout(15_000),
++      })
++      if (!response.ok) throw new Error(`终端主题同步失败（HTTP ${response.status}），请重试切换主题`)
++    }, (reason) => setError(reason.message))
++    themeSyncRef.current = themeSync
++    const transport = connectTtyd(terminal, (status) => {
++      themeSync.setConnected(status === 'ready')
++      setStatus(status)
++    }, setError)
++    connection.current = transport
++    const input = terminal.onData((data) => transport.write(applyTerminalModifiers(data, consumeModifiers())))
++    const resize = terminal.onResize(({ cols, rows }) => transport.resize(cols, rows))
++    return () => {
++      disposed = true
++      themeSync.dispose()
++      themeSyncRef.current = null
++      cancelAnimationFrame(frame)
++      document.fonts.removeEventListener('loadingdone', scheduleFit)
++      observer.disconnect()
++      unsubscribeFonts()
++      clipboard.dispose()
++      input.dispose()
++      resize.dispose()
++      transport.dispose()
++      detachTouchScroll()
++      detachInput()
++      terminal.dispose()
++      terminalRef.current = null
++      connection.current = null
++      refit.current = () => {}
++      delete window.term
++    }
++  }, [consumeModifiers])
++
++  useEffect(() => {
++    const terminal = terminalRef.current
++    if (!terminal) return
++    terminal.options.fontSize = terminalFontSize(fontSize)
++    void themeSyncRef.current?.setTheme(theme)
++    document.documentElement.style.backgroundColor = TERMINAL_XTERM_THEMES[theme].background!
++    document.documentElement.style.colorScheme = theme
++    refit.current()
++  }, [fontSize, theme])
++
++  useEffect(() => {
++    const sync = (event: StorageEvent) => {
++      if (event.key !== null && event.key !== CHAT_CONTENT_FONT_SIZE_STORAGE_KEY) return
++      try { setFontSize(clampChatContentFontSize(localStorage.getItem(CHAT_CONTENT_FONT_SIZE_STORAGE_KEY))) }
++      catch { /* Keep the current preference when storage is blocked. */ }
++    }
++    window.addEventListener('storage', sync)
++    return () => window.removeEventListener('storage', sync)
++  }, [setFontSize])
++
++  useEffect(() => {
++    if (status === 'ready' && !matchMedia('(pointer: coarse)').matches) terminalRef.current?.focus()
++  }, [status])
++
++  function sendKey(key: TerminalExtraKey) {
++    const terminal = terminalRef.current
++    if (terminal) terminal.input(terminalExtraKeySequence(key, consumeModifiers(), terminal.modes.applicationCursorKeysMode), true)
++  }
++
++  function toggleModifier(key: TerminalModifier) {
++    const next = { ...modifiersRef.current, [key]: !modifiersRef.current[key] }
++    modifiersRef.current = next
++    setModifiers(next)
++  }
++
++  return (
++    <section className="terminal-panel" data-terminal-theme={theme} aria-label="Pi TUI">
++      <header className="terminal-panel-header">
++        <div className="terminal-panel-path">
++          <span className={`terminal-status-dot is-${status}`} title={t(`terminal.${status}`)} />
++          <a href="/" target="_blank" rel="noopener noreferrer">Pi Web</a>
++        </div>
++        <div className="terminal-panel-actions" onMouseDown={(event) => event.preventDefault()}>
++          <button type="button" aria-label="减小字号" disabled={fontSize <= CHAT_CONTENT_FONT_SIZE_MIN} onClick={() => setFontSize(fontSize - 1)}>A−</button>
++          <span aria-label="终端字号">{terminalFontSize(fontSize)}</span>
++          <button type="button" aria-label="增大字号" disabled={fontSize >= CHAT_CONTENT_FONT_SIZE_MAX} onClick={() => setFontSize(fontSize + 1)}>A+</button>
++          <button type="button" aria-label={t(theme === 'dark' ? 'terminal.lightTheme' : 'terminal.darkTheme')} onClick={() => setTerminalTheme(theme === 'dark' ? 'light' : 'dark')}>{theme === 'dark' ? '☀' : '☾'}</button>
++          {status !== 'ready' && <button type="button" onClick={() => connection.current?.reconnect()}>重新连接</button>}
++        </div>
++      </header>
++      <div>
++        {error && <div className="terminal-panel-error" role="alert">{error}</div>}
++        {status === 'exited' && <div className="terminal-panel-exit" role="status">Pi 已退出；请回到 Web 会话重新打开 TUI。</div>}
++      </div>
++      <div className="terminal-xterm"><div className="terminal-xterm-host" ref={container} /></div>
++      {extraKeys && <TerminalExtraKeys modifiers={modifiers} onKey={sendKey} onToggleModifier={toggleModifier} />}
++    </section>
++  )
++}
++
++void document.fonts.load('1em "Noto Sans Mono"').catch(() => []).then(() => {
++  createRoot(document.getElementById('root')!).render(<I18nProvider><Tui /></I18nProvider>)
++})
+diff --git a/lib/workbot-ttyd.ts b/lib/workbot-ttyd.ts
+new file mode 100644
+index 0000000..1bf2373
+--- /dev/null
++++ b/lib/workbot-ttyd.ts
+@@ -0,0 +1,125 @@
++import type { Terminal } from '@xterm/xterm'
++
++type Status = 'connecting' | 'ready' | 'exited' | 'error'
++
++/** Only the ttyd wire protocol lives here; process ownership stays with tmux. */
++export function connectTtyd(
++  terminal: Terminal,
++  onStatus: (status: Status) => void,
++  onError: (message: string) => void,
++) {
++  const base = window.location.pathname.replace(/\/+$/, '')
++  const encoder = new TextEncoder()
++  const decoder = new TextDecoder()
++  let socket: WebSocket | undefined
++  let request: AbortController | undefined
++  let retry: ReturnType<typeof setTimeout> | undefined
++  let revision = 0
++  let stopped = false
++  let ended = false
++
++  function disconnect() {
++    revision++
++    clearTimeout(retry)
++    request?.abort()
++    socket?.close()
++    socket = undefined
++    terminal.options.disableStdin = true
++  }
++
++  async function connect() {
++    if (stopped || ended || !navigator.onLine || socket) return
++    clearTimeout(retry)
++    const current = ++revision
++    request = new AbortController()
++    onStatus('connecting')
++    try {
++      const response = await fetch(`${base}/token`, {
++        cache: 'no-store',
++        signal: AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]),
++      })
++      if (!response.ok) throw new Error(`终端认证失败（HTTP ${response.status}），请返回 Pi Web 重新登录`)
++      const token: unknown = await response.json()
++      if (!token || typeof token !== 'object' || !('token' in token) || typeof token.token !== 'string')
++        throw new Error('无效的 ttyd 认证响应')
++      if (stopped || current !== revision) return
++      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
++      const ws = new WebSocket(`${protocol}//${window.location.host}${base}/ws${window.location.search}`, ['tty'])
++      socket = ws
++      ws.binaryType = 'arraybuffer'
++      let pendingBytes = 0
++      let paused = false
++      const send = (data: string | Uint8Array<ArrayBuffer>) => {
++        if (ws.readyState === WebSocket.OPEN) ws.send(data)
++      }
++      ws.onopen = () => {
++        if (current !== revision) return
++        terminal.reset()
++        send(encoder.encode(JSON.stringify({ AuthToken: token.token, columns: terminal.cols, rows: terminal.rows })))
++        terminal.options.disableStdin = false
++        onError('')
++        onStatus('ready')
++      }
++      ws.onmessage = (event: MessageEvent<unknown>) => {
++        if (current !== revision || !(event.data instanceof ArrayBuffer)) return
++        const bytes = new Uint8Array(event.data)
++        if (bytes[0] === 48) {
++          const output = bytes.subarray(1)
++          pendingBytes += output.byteLength
++          if (!paused && pendingBytes > 100_000) { paused = true; send(encoder.encode('2')) }
++          terminal.write(output, () => {
++            pendingBytes -= output.byteLength
++            if (paused && pendingBytes < 10_000) { paused = false; send(encoder.encode('3')) }
++          })
++        } else if (bytes[0] === 49) {
++          document.title = `${decoder.decode(bytes.subarray(1))} · Pi TUI`
++        }
++        // ttyd's preferences frame is intentionally ignored: Pi Web owns the appearance.
++      }
++      ws.onclose = (event) => {
++        if (stopped || current !== revision) return
++        socket = undefined
++        terminal.options.disableStdin = true
++        ended = event.code === 1000
++        onStatus(ended ? 'exited' : 'connecting')
++        if (!ended && navigator.onLine) retry = setTimeout(() => void connect(), 3000)
++      }
++      ws.onerror = () => {
++        if (current === revision) onError('终端连接中断，正在尝试重新连接')
++      }
++    } catch (error) {
++      if (stopped || current !== revision) return
++      terminal.options.disableStdin = true
++      onStatus('error')
++      onError(error instanceof Error ? error.message : String(error))
++    }
++  }
++
++  const hide = () => { disconnect(); if (!ended) onStatus('connecting') }
++  const show = (event: PageTransitionEvent) => { if (event.persisted) void connect() }
++  const online = () => void connect()
++  window.addEventListener('pagehide', hide)
++  window.addEventListener('pageshow', show)
++  window.addEventListener('offline', hide)
++  window.addEventListener('online', online)
++  void connect()
++
++  return {
++    write(data: string) {
++      if (socket?.readyState === WebSocket.OPEN) socket.send(encoder.encode(`0${data}`))
++    },
++    resize(cols: number, rows: number) {
++      if (socket?.readyState === WebSocket.OPEN)
++        socket.send(encoder.encode(`1${JSON.stringify({ columns: cols, rows })}`))
++    },
++    reconnect() { disconnect(); ended = false; void connect() },
++    dispose() {
++      stopped = true
++      disconnect()
++      window.removeEventListener('pagehide', hide)
++      window.removeEventListener('pageshow', show)
++      window.removeEventListener('offline', hide)
++      window.removeEventListener('online', online)
++    },
++  }
++}
+diff --git a/tsconfig.json b/tsconfig.json
+index d9eba3f..f633d86 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -1,5 +1,6 @@
+ {
+   "compilerOptions": {
++    "types": ["node", "react", "react-dom"],
+     "lib": [
+       "dom",
+       "dom.iterable",
+diff --git a/app/api/sessions/[id]/route.ts b/app/api/sessions/[id]/route.ts
+index e2ed818..1173ce4 100644
+--- a/app/api/sessions/[id]/route.ts
++++ b/app/api/sessions/[id]/route.ts
+@@ -19,6 +19,7 @@ import type { SessionEntry } from "@/lib/types";
+ import { readSubagentRun, readSubagentSessionResources } from "@/lib/subagents";
+ import { readSideRelation, sideOwnEntries } from "@/lib/side-session";
+ import { readSessionToolSelection } from "@/lib/session-tool-selection";
++import { readWorkbotOrigin } from "@/lib/workbot-origin";
+ import { jsonResponse } from "@/lib/json-response";
+ import { deleteSessions } from "@/lib/session-delete";
+ import { attachTranscriptNotices, readSessionTranscriptNotices } from "@/lib/transcript-notices-server";
+@@ -117,6 +118,7 @@ export async function GET(
+       ?? readSessionToolSelection(entries as never);
+     const info = header ? (await attachSessionProjectInfo([{
+       path: filePath,
++      origin: readWorkbotOrigin(entries, header.id),
+       id: header.id,
+       cwd: header.cwd ?? "",
+       name: sessionName,
+diff --git a/lib/session-reader.ts b/lib/session-reader.ts
+index 56819fa..a1005ad 100644
+--- a/lib/session-reader.ts
++++ b/lib/session-reader.ts
+@@ -18,6 +18,8 @@ import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
+ import { readSideRelation } from "./side-session";
+ import { checkSessionMembership, listSessionsIncremental, scanSessionFileInfo, type ScannedSessionInfo } from "./session-list-scanner";
+
++import { readWorkbotOrigin, type WorkbotOrigin } from "./workbot-origin";
++
+ export { getAgentDir };
+
+ const SESSION_HEADER_MAX_BYTES = 64 * 1024;
+@@ -198,6 +200,17 @@ type ScannedSide = NonNullable<ReturnType<typeof readSideRelation>>;
+  */
+ const scannedSubagentRuns = new WeakMap<ScannedSessionInfo, { subagent: ScannedSubagent | null; side: ScannedSide | null }>();
+
++const scannedOrigins = new WeakMap<ScannedSessionInfo, WorkbotOrigin | null>();
++
++function resolveScannedOrigin(scanned: ScannedSessionInfo): WorkbotOrigin | undefined {
++  const cached = scannedOrigins.get(scanned);
++  if (cached !== undefined) return cached ?? undefined;
++  // Includes summary-only rows: never expose an IM session as writable on first paint.
++  const origin = readWorkbotOrigin(readSessionRelationEntries(scanned.path), scanned.id);
++  scannedOrigins.set(scanned, origin ?? null);
++  return origin;
++}
++
+ function resolveScannedSessionRelation(
+   scanned: ScannedSessionInfo,
+   pathToId: Map<string, string>,
+@@ -247,6 +260,7 @@ function mapScannedSession(
+   const detailsPending = scanned.detailsPending === true;
+   return {
+     path: scanned.path,
++    origin: resolveScannedOrigin(scanned),
+     id: scanned.id,
+     cwd: scanned.cwd,
+     name: scanned.name,
+@@ -274,7 +288,16 @@ function mapScannedSession(
+ async function buildSessionList(scanned: ScannedSessionInfo[]): Promise<SessionInfo[]> {
+   const pathToId = new Map<string, string>();
+   for (const session of scanned) pathToId.set(sessionPathKey(session.path), session.id);
+-  return attachSessionProjectInfo(scanned.map((session) => mapScannedSession(session, pathToId)));
++  const sessions = scanned.flatMap((session) => {
++    try {
++      return [mapScannedSession(session, pathToId)];
++    } catch (error) {
++      // IM /new or Web deletion can remove a file after the scanner found it.
++      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return [];
++      throw error;
++    }
++  });
++  return attachSessionProjectInfo(sessions);
+ }
+
+ /**
+diff --git a/lib/types.ts b/lib/types.ts
+index 6ffd388..a815071 100644
+--- a/lib/types.ts
++++ b/lib/types.ts
+@@ -1,3 +1,5 @@
++import type { WorkbotOrigin } from "./workbot-origin";
++
+ // Types mirrored from pi-mono coding-agent session-manager
+
+ export interface SessionHeader {
+@@ -355,6 +357,7 @@ export interface SessionTreeNode {
+ }
+
+ export interface SessionInfo {
++  origin?: WorkbotOrigin;
+   path: string;
+   id: string;
+   cwd: string;
+diff --git a/lib/workbot-origin.test.mjs b/lib/workbot-origin.test.mjs
+new file mode 100644
+index 0000000..166f54b
+--- /dev/null
++++ b/lib/workbot-origin.test.mjs
+@@ -0,0 +1,151 @@
++import assert from "node:assert/strict";
++import { mkdtempSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
++import * as fs from "node:fs";
++import { createRequire } from "node:module";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { Script, createContext } from "node:vm";
++import test from "node:test";
++import ts from "typescript";
++import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
++import { readWorkbotOrigin } from "./workbot-origin.ts";
++import { listAllSessions, listSessionSummaries, readSessionInfo, invalidateSessionListCache, invalidateSessionPathCache } from "./session-reader.ts";
++import { resetSessionScanIndexForTests, flushSessionScanIndexForTests } from "./session-list-scanner.ts";
++
++function origin(adapter = "feishu", sessionId = "fixture") {
++  return { type: "custom", customType: "workbot.origin", data: { kind: "im", adapter, sessionId } };
++}
++
++test("only a leading, shaped, session-bound custom entry identifies IM origin", () => {
++  assert.deepEqual(readWorkbotOrigin([origin()], "fixture"), { kind: "im", adapter: "feishu" });
++  assert.deepEqual(readWorkbotOrigin([origin("wecom")], "fixture"), { kind: "im", adapter: "wecom" });
++  for (const entries of [
++    [], [null], ["workbot.origin"], [{ ...origin(), type: "message" }],
++    [{ ...origin(), customType: "other" }], [{ ...origin(), data: null }],
++    [{ ...origin(), data: { kind: "im", adapter: "feishu" } }],
++    [{ ...origin(), data: { kind: "web", adapter: "feishu", sessionId: "fixture" } }],
++    [origin("../feishu")], [origin(123)], [origin("feishu", "different-session")],
++    [{ type: "message", message: { role: "user", content: JSON.stringify(origin()) } }, origin()],
++  ]) assert.equal(readWorkbotOrigin(entries, "fixture"), undefined);
++  assert.equal(readWorkbotOrigin([origin()], "web-fork"), undefined, "a fork must not inherit IM ownership");
++});
++
++test("summary, full, cached and moved sessions preserve source before any model reply", async (t) => {
++  const root = mkdtempSync(join(tmpdir(), "workbot-origin-"));
++  const previous = process.env.PI_CODING_AGENT_DIR;
++  process.env.PI_CODING_AGENT_DIR = root;
++  resetSessionScanIndexForTests();
++  invalidateSessionListCache();
++  invalidateSessionPathCache();
++  t.after(() => {
++    resetSessionScanIndexForTests();
++    invalidateSessionListCache();
++    invalidateSessionPathCache();
++    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
++    else process.env.PI_CODING_AGENT_DIR = previous;
++    rmSync(root, { recursive: true, force: true });
++  });
++  const cwd = join(root, "workspace");
++  const dir = join(root, "sessions", "arbitrary-location");
++  mkdirSync(cwd);
++  mkdirSync(dir, { recursive: true });
++  const manager = SessionManager.inMemory(cwd);
++  manager.appendCustomEntry("workbot.origin", { kind: "im", adapter: "wecom", sessionId: manager.getSessionId() });
++  const file = join(dir, "unrelated-name.jsonl");
++  writeFileSync(file, [manager.getHeader(), ...manager.getEntries()].map(JSON.stringify).join("\n") + "\n");
++
++  const summary = (await listSessionSummaries()).find((item) => item.id === manager.getSessionId());
++  assert.equal(summary.detailsPending, true);
++  assert.equal(summary.cwd, cwd);
++  assert.deepEqual(summary.origin, { kind: "im", adapter: "wecom" });
++  assert.deepEqual((await listAllSessions({ force: true }))[0].origin, summary.origin);
++  flushSessionScanIndexForTests();
++  resetSessionScanIndexForTests();
++  assert.deepEqual((await listSessionSummaries())[0].origin, summary.origin);
++  const opened = SessionManager.open(file);
++  opened.appendMessage({ role: "user", content: "first message", timestamp: Date.now() });
++  assert.deepEqual((await listAllSessions({ force: true }))[0].origin, summary.origin);
++  const moved = join(dir, "moved.jsonl");
++  renameSync(file, moved);
++  assert.deepEqual((await readSessionInfo(moved)).origin, summary.origin);
++
++  const web = SessionManager.create(cwd, dir);
++  web.appendMessage({ role: "user", content: "来自即时通讯的用户消息：workbot.origin feishu", timestamp: Date.now() });
++  assert.equal((await readSessionInfo(web.getSessionFile())).origin, undefined);
++});
++
++for (const code of ["ENOENT", "EACCES"]) {
++  test(code === "ENOENT" ? "a session removed between scanning and origin reading does not break the list" : "session origin permission errors are not hidden", async (t) => {
++    const root = mkdtempSync(join(tmpdir(), "workbot-origin-race-"));
++    const previous = process.env.PI_CODING_AGENT_DIR;
++    process.env.PI_CODING_AGENT_DIR = root;
++    resetSessionScanIndexForTests();
++    t.after(() => {
++      resetSessionScanIndexForTests();
++      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
++      else process.env.PI_CODING_AGENT_DIR = previous;
++      rmSync(root, { recursive: true, force: true });
++    });
++    const dir = join(root, "sessions", "im");
++    mkdirSync(dir, { recursive: true });
++    const managers = [SessionManager.inMemory(root), SessionManager.inMemory(root)];
++    const files = managers.map((manager, index) => {
++      manager.appendCustomEntry("workbot.origin", { kind: "im", adapter: "feishu", sessionId: manager.getSessionId() });
++      const file = join(dir, `${index}.jsonl`);
++      writeFileSync(file, [manager.getHeader(), ...manager.getEntries()].map(JSON.stringify).join("\n") + "\n");
++      return file;
++    });
++    const require = createRequire(import.meta.url);
++    const failure = Object.assign(new Error("Session origin read denied"), { code });
++    // Fail only at the reader boundary, after the real scanner returned the row.
++    const context = createContext({ exports: {}, Buffer, require: (name) => name === "fs" ? {
++      ...fs,
++      openSync(path, ...args) {
++        if (path === files[0]) {
++          if (code === "EACCES") throw failure;
++          rmSync(path, { force: true });
++        }
++        return openSync(path, ...args);
++      },
++    } : name === "@earendil-works/pi-coding-agent" ? { SessionManager, getAgentDir } : require(name) });
++    const source = readFileSync(new URL("./session-reader.ts", import.meta.url), "utf8");
++    new Script(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS } }).outputText).runInContext(context);
++
++    if (code === "EACCES") {
++      await assert.rejects(context.exports.listAllSessions({ force: true }), failure);
++      return;
++    }
++    const sessions = await context.exports.listAllSessions({ force: true });
++
++    assert.equal(sessions.length, 1);
++    assert.equal(sessions[0].id, managers[1].getSessionId());
++    assert.equal(sessions[0].origin.adapter, "feishu");
++  });
++}
++
++test("terminal launch rejects a marked IM session regardless of file location", async (t) => {
++  const root = mkdtempSync(join(tmpdir(), "workbot-origin-terminal-"));
++  t.after(() => rmSync(root, { recursive: true, force: true }));
++  const manager = SessionManager.inMemory(root);
++  manager.appendCustomEntry("workbot.origin", { kind: "im", adapter: "feishu", sessionId: manager.getSessionId() });
++  const file = join(root, "normal.jsonl");
++  writeFileSync(file, [manager.getHeader(), ...manager.getEntries()].map(JSON.stringify).join("\n") + "\n");
++  let launches = 0;
++  const dependencies = {
++    "next/server": { NextResponse: { json: Response.json } },
++    "node:fs/promises": await import("node:fs/promises"),
++    "node:path": await import("node:path"),
++    "@earendil-works/pi-coding-agent": { SessionManager },
++    "@/lib/session-reader": { resolveSessionPath: async () => file },
++    "@/lib/rpc-manager": {}, "@/lib/session-liveness": {}, "@/lib/subagent-runtime": {}, "@/lib/subagents": {},
++    "@/lib/workbot-origin": { readWorkbotOrigin },
++    "@/lib/workbot-terminal": { terminalEnabled: () => true, terminalActive: async () => false, startTerminal: async () => { launches++; } },
++  };
++  const source = readFileSync(new URL("../app/api/sessions/[id]/terminal/route.ts", import.meta.url), "utf8");
++  const context = createContext({ exports: {}, require: (name) => dependencies[name], console });
++  new Script(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS } }).outputText).runInContext(context);
++  const response = await context.exports.POST(new Request("http://localhost"), { params: Promise.resolve({ id: manager.getSessionId() }) });
++  assert.equal(response.status, 403);
++  assert.deepEqual(await response.json(), { error: "请在 IM 中继续此会话" });
++  assert.equal(launches, 0);
++});
+diff --git a/lib/workbot-terminal-touch.test.mjs b/lib/workbot-terminal-touch.test.mjs
+new file mode 100644
+index 0000000..af5a7a5
+--- /dev/null
++++ b/lib/workbot-terminal-touch.test.mjs
+@@ -0,0 +1,112 @@
++import assert from 'node:assert/strict'
++import test from 'node:test'
++import { attachTerminalTouchScroll } from './workbot-terminal-touch.ts'
++
++function fixture() {
++  class WheelEvent extends Event {
++    constructor(type, { bubbles, cancelable, ...coordinates }) { super(type, { bubbles, cancelable }); Object.assign(this, coordinates) }
++  }
++  const screen = new EventTarget()
++  const wheels = []
++  screen.addEventListener('wheel', (event) => wheels.push(event))
++  const element = Object.assign(new EventTarget(), {
++    querySelector: () => screen,
++    ownerDocument: { defaultView: { WheelEvent } },
++  })
++  const terminal = { element, options: { disableStdin: false }, modes: { mouseTrackingMode: 'drag' } }
++  const detach = attachTerminalTouchScroll(terminal)
++  function touch(type, points = [[100, 200]]) {
++    const event = new Event(type, { cancelable: true })
++    event.touches = points.map(([clientX, clientY], identifier) => ({ clientX, clientY, identifier }))
++    element.dispatchEvent(event)
++    return event
++  }
++  return { terminal, wheels, touch, detach }
++}
++
++test('vertical swipes forward both directions as pixel wheels at the touch position', () => {
++  const { touch, wheels, detach } = fixture()
++  try {
++    assert.equal(touch('touchstart').defaultPrevented, false)
++    assert.equal(touch('touchmove', [[101, 240]]).defaultPrevented, true)
++    touch('touchmove', [[102, 260]])
++    touch('touchmove', [[103, 220]])
++    assert.deepEqual(wheels.map(({ deltaY }) => deltaY), [-40, -20, 40])
++    assert.equal(wheels[0].clientX, 101)
++    assert.equal(wheels[0].clientY, 240)
++    assert.equal(wheels[0].deltaMode, 0)
++    assert.equal(wheels[0].bubbles, true)
++  } finally { detach() }
++})
++
++test('taps, small jitter and horizontal swipes do not send input or suppress default actions', () => {
++  const { touch, wheels, detach } = fixture()
++  try {
++    touch('touchstart')
++    assert.equal(touch('touchmove', [[101, 203]]).defaultPrevented, false)
++    touch('touchend', [])
++    touch('touchstart')
++    assert.equal(touch('touchmove', [[140, 204]]).defaultPrevented, false)
++    touch('touchmove', [[140, 280]])
++    assert.equal(wheels.length, 0)
++  } finally { detach() }
++})
++
++test('multi-touch cancels the gesture without generating scroll input', () => {
++  const { touch, wheels, detach } = fixture()
++  try {
++    touch('touchstart')
++    touch('touchstart', [[100, 200], [150, 200]])
++    assert.equal(touch('touchmove', [[100, 240], [150, 240]]).defaultPrevented, false)
++    touch('touchmove', [[100, 280]])
++    assert.equal(wheels.length, 0)
++  } finally { detach() }
++})
++
++test('disconnected or non-mouse-tracking terminals do not turn swipes into keyboard input', () => {
++  const { terminal, touch, wheels, detach } = fixture()
++  try {
++    terminal.options.disableStdin = true
++    touch('touchstart')
++    touch('touchmove', [[100, 240]])
++    terminal.options.disableStdin = false
++    terminal.modes.mouseTrackingMode = 'none'
++    touch('touchstart')
++    touch('touchmove', [[100, 240]])
++    terminal.modes.mouseTrackingMode = 'drag'
++    touch('touchstart')
++    terminal.options.disableStdin = true
++    touch('touchmove', [[100, 240]])
++    terminal.options.disableStdin = false
++    touch('touchmove', [[100, 280]])
++    assert.equal(wheels.length, 0)
++  } finally { detach() }
++})
++
++test('touch end, cancellation and cleanup discard the previous gesture', () => {
++  const { touch, wheels, detach } = fixture()
++  try {
++    for (const end of ['touchend', 'touchcancel']) {
++      touch('touchstart')
++      touch(end, [])
++      touch('touchmove', [[100, 240]])
++    }
++    touch('touchstart')
++    detach()
++    touch('touchmove', [[100, 240]])
++    touch('touchstart')
++    touch('touchmove', [[100, 280]])
++    assert.equal(wheels.length, 0)
++  } finally { detach() }
++})
++
++test('a fresh gesture works after cancelling a previous swipe', () => {
++  const { touch, wheels, detach } = fixture()
++  try {
++    touch('touchstart')
++    touch('touchcancel', [])
++    touch('touchstart', [[100, 400]])
++    touch('touchmove', [[100, 360]])
++    assert.deepEqual(wheels.map(({ deltaY }) => deltaY), [40])
++  } finally { detach() }
++})
+diff --git a/lib/workbot-terminal-touch.ts b/lib/workbot-terminal-touch.ts
+new file mode 100644
+index 0000000..9dfb596
+--- /dev/null
++++ b/lib/workbot-terminal-touch.ts
+@@ -0,0 +1,54 @@
++import type { Terminal } from '@xterm/xterm'
++
++// xterm 6 handles wheel events but does not translate touch gestures for mouse-tracking apps.
++// Keep Pi/tmux in charge of history instead of scrolling a second browser-side buffer.
++export function attachTerminalTouchScroll(terminal: Terminal): () => void {
++  const element = terminal.element!
++  const screen = element.querySelector<HTMLElement>('.xterm-screen')!
++  const Wheel = element.ownerDocument.defaultView!.WheelEvent
++  let touch: { id: number; x: number; y: number; lastY: number; scrolling: boolean } | null = null
++  const enabled = () => !terminal.options.disableStdin && terminal.modes.mouseTrackingMode !== 'none'
++  const reset = () => { touch = null }
++  const start = (event: TouchEvent) => {
++    reset()
++    if (!enabled() || event.touches.length !== 1) return
++    const point = event.touches[0]
++    touch = { id: point.identifier, x: point.clientX, y: point.clientY, lastY: point.clientY, scrolling: false }
++  }
++  const move = (event: TouchEvent) => {
++    if (!touch) return
++    const point = event.touches[0]
++    if (!enabled() || event.touches.length !== 1 || point.identifier !== touch.id) {
++      reset()
++      return
++    }
++    if (!touch.scrolling) {
++      const dx = Math.abs(point.clientX - touch.x)
++      const dy = Math.abs(point.clientY - touch.y)
++      if (Math.max(dx, dy) < 6) return
++      if (dx > dy) { reset(); return }
++      touch.scrolling = true
++    }
++    event.preventDefault()
++    screen.dispatchEvent(new Wheel('wheel', {
++      bubbles: true,
++      cancelable: true,
++      clientX: point.clientX,
++      clientY: point.clientY,
++      deltaY: touch.lastY - point.clientY,
++      deltaMode: 0,
++    }))
++    touch.lastY = point.clientY
++  }
++  element.addEventListener('touchstart', start, { passive: true })
++  element.addEventListener('touchmove', move, { passive: false })
++  element.addEventListener('touchend', reset)
++  element.addEventListener('touchcancel', reset)
++  return () => {
++    reset()
++    element.removeEventListener('touchstart', start)
++    element.removeEventListener('touchmove', move)
++    element.removeEventListener('touchend', reset)
++    element.removeEventListener('touchcancel', reset)
++  }
++}
+diff --git a/lib/workbot-origin.ts b/lib/workbot-origin.ts
+new file mode 100644
+index 0000000..79c5200
+--- /dev/null
++++ b/lib/workbot-origin.ts
+@@ -0,0 +1,18 @@
++export interface WorkbotOrigin {
++  kind: "im";
++  adapter: string;
++}
++
++/** Only the bridge's leading custom entry identifies the owning channel.
++ * Bind it to the session ID so copied history in a Web fork is not IM-owned. */
++export function readWorkbotOrigin(entries: readonly unknown[], sessionId: string): WorkbotOrigin | undefined {
++  const entry = entries[0];
++  if (!entry || typeof entry !== "object" || !("type" in entry) || entry.type !== "custom"
++    || !("customType" in entry) || entry.customType !== "workbot.origin" || !("data" in entry)) return undefined;
++  const data = entry.data;
++  if (!data || typeof data !== "object" || !("kind" in data) || data.kind !== "im"
++    || !("sessionId" in data) || data.sessionId !== sessionId
++    || !("adapter" in data) || typeof data.adapter !== "string"
++    || !/^[a-zA-Z0-9_-][a-zA-Z0-9._-]*$/.test(data.adapter)) return undefined;
++  return { kind: "im", adapter: data.adapter };
++}
+diff --git a/components/TerminalPanel.tsx b/components/TerminalPanel.tsx
+index ea6126e..9401cd3 100644
+--- a/components/TerminalPanel.tsx
++++ b/components/TerminalPanel.tsx
+@@ -20,6 +20,8 @@ import {
+ } from "@/lib/terminal-extra-keys";
+ import type { TerminalEvent } from "@/lib/terminal-manager";
+ import { TERMINAL_XTERM_THEMES } from "@/lib/terminal-theme";
++import { createTerminalThemeSync } from "@/lib/workbot-terminal-theme";
++import { attachTerminalInput, focusTerminalOnDesktop } from "@/lib/workbot-terminal-input";
+ import { TerminalExtraKeys, useTerminalExtraKeysVisible } from "./TerminalExtraKeys";
+ import type { TerminalTab } from "./terminal-tab-state";
+
+@@ -38,6 +40,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+   const terminalRef = useRef<Terminal | null>(null);
+   const startRef = useRef<Promise<void>>(Promise.resolve());
+   const writerRef = useRef<ReturnType<typeof createTerminalWriter> | null>(null);
++  const themeSyncRef = useRef<ReturnType<typeof createTerminalThemeSync> | null>(null);
+   const callbacksRef = useRef({ onClosed, onCloseError });
+   callbacksRef.current = { onClosed, onCloseError };
+   const [status, setStatus] = useState<"connecting" | "ready" | "exited" | "error">("connecting");
+@@ -110,6 +113,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+     const fit = new FitAddon();
+     terminal.loadAddon(fit);
+     terminal.open(container);
++    const detachInput = attachTerminalInput(terminal);
+     terminal.attachCustomKeyEventHandler((event) => {
+       if (event.type !== "keydown") return true;
+       const key = event.key.toLowerCase();
+@@ -126,6 +130,8 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+       setStatus("error");
+     });
+     writerRef.current = writer;
++    const themeSync = createTerminalThemeSync(terminal, themeRef.current, (next) => writer.theme(next), (reason) => setError(reason.message));
++    themeSyncRef.current = themeSync;
+     const onData = terminal.onData((data) => {
+       if (connected && !exited && !inputFailed) writer.write(applyTerminalModifiers(data, consumeModifiers()));
+     });
+@@ -166,6 +172,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+         } else {
+           exited = true;
+           connected = false;
++          themeSync.setConnected(false);
+           terminal.options.disableStdin = true;
+           events?.close();
+           setExitCode(event.type === "exit" ? event.exitCode : null);
+@@ -175,15 +182,17 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+       events.onopen = () => {
+         connected = true;
+         if (inputFailed) return;
++        themeSync.setConnected(true);
+         terminal.options.disableStdin = false;
+         setStatus("ready");
+         fitAndResize();
+         writer.resize(Math.max(2, terminal.cols), Math.max(2, terminal.rows));
+-        if (container.offsetWidth && container.offsetHeight) terminal.focus();
++        if (container.offsetWidth && container.offsetHeight) focusTerminalOnDesktop(terminal);
+       };
+       events.onerror = () => {
+         if (disposed || exited) return;
+         connected = false;
++        themeSync.setConnected(false);
+         terminal.options.disableStdin = true;
+         setStatus(events?.readyState === EventSource.CLOSED ? "error" : "connecting");
+       };
+@@ -210,6 +219,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+
+     const pageHide = () => {
+       connected = false;
++      themeSync.setConnected(false);
+       terminal.options.disableStdin = true;
+       events?.close();
+       if (!exited && !inputFailed) setStatus("connecting");
+@@ -221,6 +231,8 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+     window.addEventListener("online", connect);
+     return () => {
+       disposed = true;
++      themeSync.dispose();
++      themeSyncRef.current = null;
+       events?.close();
+       void writer.stop();
+       resizeObserver.disconnect();
+@@ -231,6 +243,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+       window.removeEventListener("pageshow", pageShow);
+       window.removeEventListener("offline", pageHide);
+       window.removeEventListener("online", connect);
++      detachInput();
+       terminal.dispose();
+       terminalRef.current = null;
+       refitRef.current = () => {};
+@@ -238,7 +251,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+   }, [id, cwd, restored, reconnectKey, consumeModifiers]);
+
+   useEffect(() => {
+-    if (terminalRef.current) terminalRef.current.options.theme = TERMINAL_XTERM_THEMES[theme];
++    void themeSyncRef.current?.setTheme(theme);
+   }, [theme]);
+
+   useEffect(() => {
+@@ -250,7 +263,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+   }, [fontSize]);
+
+   useEffect(() => {
+-    if (active) terminalRef.current?.focus();
++    if (active && terminalRef.current) focusTerminalOnDesktop(terminalRef.current);
+   }, [active]);
+
+   useEffect(() => {
+diff --git a/lib/workbot-terminal-input.ts b/lib/workbot-terminal-input.ts
+new file mode 100644
+index 0000000..00baaf9
+--- /dev/null
++++ b/lib/workbot-terminal-input.ts
+@@ -0,0 +1,69 @@
++import type { Terminal } from '@xterm/xterm'
++
++// Mobile browsers may focus a readonly textarea without opening the keyboard,
++// then ignore focus() once stdin is enabled. Leave focus to xterm's tap handler
++// instead of acquiring it during mount or the asynchronous connection callback.
++export function focusTerminalOnDesktop(terminal: Terminal): void {
++  if (terminal.options.disableStdin) return
++  if (window.matchMedia('(any-pointer: coarse)').matches) return
++  terminal.focus()
++}
++
++// Candidate-only IMEs can commit long after keydown(229), without composition*.
++// xterm's textarea-diff timer has then expired, while _keyDownSeen still blocks
++// insertText. Own cancellable commits before the textarea changes, so neither
++// xterm's input handler nor its pending diff timer can send the text again.
++export function attachTerminalInput(terminal: Terminal): () => void {
++  const textarea = terminal.textarea
++  if (!textarea) return () => {}
++  let composing = false
++  let finishing = false
++  let keyHandled = false
++  let timer: ReturnType<typeof setTimeout> | undefined
++  const key = terminal.onKey(() => { keyHandled = true })
++  const resetKey = () => { keyHandled = false }
++  const start = () => {
++    clearTimeout(timer)
++    composing = true
++    finishing = false
++  }
++  const end = () => {
++    composing = false
++    finishing = true
++    // xterm finalizes composition on a zero-delay timer, including the trailing
++    // insertText that some browsers emit after compositionend.
++    clearTimeout(timer)
++    timer = setTimeout(() => { finishing = false }, 0)
++  }
++  const reset = () => {
++    clearTimeout(timer)
++    composing = finishing = keyHandled = false
++  }
++  const beforeInput = (event: InputEvent) => {
++    if (event.defaultPrevented || !event.cancelable || event.isComposing || composing || finishing || keyHandled) return
++    if (terminal.options.disableStdin || !event.data) return
++    if (event.inputType !== 'insertText' && event.inputType !== 'insertReplacementText') return
++    // Do not turn autocorrection of already-sent text into an extra insertion.
++    if (event.inputType === 'insertReplacementText' && textarea.selectionStart !== textarea.selectionEnd) return
++    event.preventDefault()
++    terminal.input(event.data, true)
++  }
++  // beforeinput is not used by xterm. Key resets run before its capture handler.
++  const host = terminal.element!
++  host.addEventListener('keydown', resetKey, true)
++  host.addEventListener('keyup', resetKey, true)
++  textarea.addEventListener('compositionstart', start)
++  textarea.addEventListener('compositionend', end)
++  textarea.addEventListener('beforeinput', beforeInput)
++  textarea.addEventListener('blur', reset)
++  return () => {
++    reset()
++    key.dispose()
++    host.removeEventListener('keydown', resetKey, true)
++    host.removeEventListener('keyup', resetKey, true)
++    textarea.removeEventListener('compositionstart', start)
++    textarea.removeEventListener('compositionend', end)
++    textarea.removeEventListener('beforeinput', beforeInput)
++    textarea.removeEventListener('blur', reset)
++  }
++}
+diff --git a/lib/workbot-terminal-input.test.mjs b/lib/workbot-terminal-input.test.mjs
+new file mode 100644
+index 0000000..f7dabae
+--- /dev/null
++++ b/lib/workbot-terminal-input.test.mjs
+@@ -0,0 +1,160 @@
++import assert from 'node:assert/strict'
++import test from 'node:test'
++import { readFileSync } from 'node:fs'
++import { attachTerminalInput, focusTerminalOnDesktop } from './workbot-terminal-input.ts'
++
++test('mount and asynchronous connection never pre-focus a touch terminal', async () => {
++  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
++  let coarse = true
++  let focusCount = 0
++  const queries = []
++  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
++    matchMedia(query) { queries.push(query); return { matches: coarse } },
++  } })
++  const terminal = {
++    options: { disableStdin: true },
++    focus() { focusCount++ },
++  }
++  try {
++    // Fresh tab: the activation effect runs while stdin is still readonly.
++    focusTerminalOnDesktop(terminal)
++    assert.equal(focusCount, 0)
++    await Promise.resolve()
++    terminal.options.disableStdin = false
++    focusTerminalOnDesktop(terminal)
++    assert.equal(focusCount, 0)
++    // Restored tabs and switching back to an existing tab use the same policy.
++    focusTerminalOnDesktop(terminal)
++    assert.equal(focusCount, 0)
++    assert.deepEqual(queries, ['(any-pointer: coarse)', '(any-pointer: coarse)'])
++    coarse = false
++    focusTerminalOnDesktop(terminal)
++    assert.equal(focusCount, 1, 'desktop terminals still focus once ready')
++    terminal.options.disableStdin = true
++    focusTerminalOnDesktop(terminal)
++    assert.equal(focusCount, 1, 'disconnected desktop terminals stay unfocused')
++  } finally {
++    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)
++    else delete globalThis.window
++  }
++})
++
++test('both TerminalPanel autofocus paths use the touch-safe policy', () => {
++  const panel = readFileSync(new URL('../components/TerminalPanel.tsx', import.meta.url), 'utf8')
++  assert.match(panel, /if \(container\.offsetWidth && container\.offsetHeight\) focusTerminalOnDesktop\(terminal\)/)
++  assert.match(panel, /if \(active && terminalRef\.current\) focusTerminalOnDesktop\(terminalRef\.current\)/)
++  assert.doesNotMatch(panel, /\.focus\(/)
++})
++
++function fixture() {
++  const textarea = Object.assign(new EventTarget(), { selectionStart: 0, selectionEnd: 0 })
++  const element = new EventTarget()
++  const writes = []
++  let onKey = () => {}
++  const terminal = {
++    textarea, element, options: { disableStdin: false },
++    onKey(listener) { onKey = listener; return { dispose() { onKey = () => {} } } },
++    input(data, userInput) { writes.push({ data, userInput }) },
++  }
++  const detach = attachTerminalInput(terminal)
++  function commit(data, options = {}) {
++    const { cancelable = true, ...properties } = options
++    const event = Object.assign(new Event('beforeinput', { cancelable }), {
++      data, inputType: 'insertText', isComposing: false, ...properties,
++    })
++    textarea.dispatchEvent(event)
++    return event
++  }
++  return { terminal, textarea, element, writes, commit, detach, handledKey: () => onKey() }
++}
++
++for (const text of ['中文候选', '日本語', '한국어', '😊']) {
++  test(`candidate-only commit sends ${text} once without waiting for composition events`, () => {
++    const { element, commit, writes, detach } = fixture()
++    try {
++      element.dispatchEvent(new Event('keydown'))
++      assert.equal(commit(text).defaultPrevented, true)
++      assert.deepEqual(writes, [{ data: text, userInput: true }])
++    } finally { detach() }
++  })
++}
++
++test('successive and repeated candidates are not deduplicated by text', () => {
++  const { commit, writes, detach } = fixture()
++  try {
++    commit('中'); commit('中'); commit('文')
++    assert.deepEqual(writes.map(({ data }) => data), ['中', '中', '文'])
++  } finally { detach() }
++})
++
++test('native inline composition and its trailing insertText remain owned by xterm', async () => {
++  const { textarea, commit, writes, detach } = fixture()
++  try {
++    textarea.dispatchEvent(new Event('compositionstart'))
++    assert.equal(commit('zhong').defaultPrevented, false)
++    textarea.dispatchEvent(new Event('compositionend'))
++    assert.equal(commit('中').defaultPrevented, false)
++    // Flush the adapter's composition-finalization task, not a readiness sleep.
++    await new Promise((resolve) => setTimeout(resolve, 0))
++    assert.equal(commit('文').defaultPrevented, true)
++    assert.deepEqual(writes.map(({ data }) => data), ['文'])
++  } finally { detach() }
++})
++
++test('a handled physical key is not sent again; the next IME key can commit', () => {
++  const { element, handledKey, commit, writes, detach } = fixture()
++  try {
++    element.dispatchEvent(new Event('keydown'))
++    handledKey()
++    assert.equal(commit('A').defaultPrevented, false)
++    element.dispatchEvent(new Event('keyup'))
++    element.dispatchEvent(new Event('keydown'))
++    assert.equal(commit('中').defaultPrevented, true)
++    assert.deepEqual(writes.map(({ data }) => data), ['中'])
++  } finally { detach() }
++})
++
++test('non-cancellable, composing, paste, deletion and empty events stay native', () => {
++  const { commit, writes, detach } = fixture()
++  try {
++    for (const options of [
++      { cancelable: false }, { isComposing: true },
++      { inputType: 'insertCompositionText' }, { inputType: 'insertFromPaste' },
++      { inputType: 'deleteContentBackward' },
++    ]) assert.equal(commit('中', options).defaultPrevented, false)
++    assert.equal(commit(null).defaultPrevented, false)
++    assert.equal(commit('').defaultPrevented, false)
++    assert.deepEqual(writes, [])
++  } finally { detach() }
++})
++
++test('replacement commits are accepted only without replacing a selected range', () => {
++  const { textarea, commit, writes, detach } = fixture()
++  try {
++    assert.equal(commit('候选', { inputType: 'insertReplacementText' }).defaultPrevented, true)
++    textarea.selectionEnd = 2
++    assert.equal(commit('纠错', { inputType: 'insertReplacementText' }).defaultPrevented, false)
++    assert.deepEqual(writes.map(({ data }) => data), ['候选'])
++  } finally { detach() }
++})
++
++test('disconnected terminals do not accept commits, and blur resets stale composition state', () => {
++  const { terminal, textarea, commit, writes, detach } = fixture()
++  try {
++    terminal.options.disableStdin = true
++    assert.equal(commit('中').defaultPrevented, false)
++    terminal.options.disableStdin = false
++    textarea.dispatchEvent(new Event('compositionstart'))
++    textarea.dispatchEvent(new Event('blur'))
++    assert.equal(commit('文').defaultPrevented, true)
++    assert.deepEqual(writes.map(({ data }) => data), ['文'])
++  } finally { detach() }
++})
++
++test('cleanup removes listeners and cancels pending composition state', () => {
++  const { textarea, commit, writes, detach } = fixture()
++  textarea.dispatchEvent(new Event('compositionend'))
++  detach()
++  assert.equal(commit('中').defaultPrevented, false)
++  assert.deepEqual(writes, [])
++})
+diff --git a/components/WorkbotTranscript.tsx b/components/WorkbotTranscript.tsx
+new file mode 100644
+index 0000000..3e7d1ca
+--- /dev/null
++++ b/components/WorkbotTranscript.tsx
+@@ -0,0 +1,148 @@
++"use client";
++
++import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
++import { MessageView } from "./MessageView";
++import { buildToolResultsMap, EMPTY_TRANSCRIPT, mergeTailPage, prependOlderPage, type SubagentTranscript } from "./workbot-transcript-state";
++
++interface Props {
++  sessionId: string;
++  cwd?: string;
++  running: boolean;
++  onOpenFile: (filePath: string, page?: number) => void;
++  pollMs?: number;
++}
++
++function contextUrl(sessionId: string, before?: string): string {
++  const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1", tail: "100" });
++  if (before) params.set("before", before);
++  return `/api/sessions/${encodeURIComponent(sessionId)}/context?${params}`;
++}
++
++function toTranscript(page: Partial<SubagentTranscript>): SubagentTranscript {
++  return {
++    messages: page.messages ?? [],
++    entryIds: page.entryIds ?? [],
++    oldestEntryId: page.oldestEntryId ?? null,
++    hasMore: Boolean(page.hasMore),
++  };
++}
++
++/**
++ * Adapted from pi-web v0.13.0's MIT-licensed SubagentViewer.
++ * The v0.14 replacement starts an AgentSession and allows replies; IM/TUI
++ * records must only read context pages, never mount that chat or its SSE hook.
++ */
++export function WorkbotTranscript({ sessionId, cwd, running, onOpenFile, pollMs = 10_000 }: Props) {
++  const [transcript, setTranscript] = useState<SubagentTranscript>(EMPTY_TRANSCRIPT);
++  const { messages, entryIds, oldestEntryId, hasMore } = transcript;
++  const transcriptRef = useRef(transcript);
++  transcriptRef.current = transcript;
++  const [loadingEarlier, setLoadingEarlier] = useState(false);
++  const [notFound, setNotFound] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [refreshKey, setRefreshKey] = useState(0);
++
++  useEffect(() => {
++    const controller = new AbortController();
++    let cancelled = false;
++    let inFlight = false;
++    const load = async () => {
++      if (inFlight) return;
++      inFlight = true;
++      try {
++        const res = await fetch(contextUrl(sessionId), { signal: controller.signal, cache: "no-store" });
++        if (res.status === 404) {
++          if (!cancelled) setNotFound(true);
++          return;
++        }
++        if (!res.ok) throw new Error(`HTTP ${res.status}`);
++        const data = await res.json() as { context: Partial<SubagentTranscript> };
++        if (cancelled) return;
++        setNotFound(false);
++        setError(null);
++        setTranscript((current) => mergeTailPage(current, toTranscript(data.context)));
++      } catch (err) {
++        if (!cancelled && !(err instanceof Error && err.name === "AbortError")) {
++          setError(err instanceof Error ? err.message : String(err));
++        }
++      } finally {
++        inFlight = false;
++      }
++    };
++    void load();
++    const timer = running ? setInterval(() => {
++      if (document.visibilityState === "visible") void load();
++    }, pollMs) : undefined;
++    return () => {
++      cancelled = true;
++      clearInterval(timer);
++      controller.abort();
++    };
++  }, [sessionId, running, refreshKey, pollMs]);
++
++  const listRef = useRef<HTMLDivElement>(null);
++  const stickToBottomRef = useRef(true);
++  const prependAnchorRef = useRef<number | null>(null);
++  const loadingEarlierRef = useRef(false);
++  const pagingControllerRef = useRef<AbortController | null>(null);
++  useEffect(() => () => pagingControllerRef.current?.abort(), []);
++
++  const loadEarlier = useCallback(async () => {
++    const cursor = oldestEntryId;
++    if (!cursor || loadingEarlierRef.current) return;
++    loadingEarlierRef.current = true;
++    const controller = new AbortController();
++    pagingControllerRef.current = controller;
++    setLoadingEarlier(true);
++    try {
++      const res = await fetch(contextUrl(sessionId, cursor), { signal: controller.signal, cache: "no-store" });
++      if (!res.ok) throw new Error(`HTTP ${res.status}`);
++      const data = await res.json() as { context: Partial<SubagentTranscript> };
++      if (controller.signal.aborted || transcriptRef.current.oldestEntryId !== cursor) return;
++      const el = listRef.current;
++      prependAnchorRef.current = el ? el.scrollHeight - el.scrollTop : null;
++      setTranscript((current) => prependOlderPage(current, cursor, toTranscript(data.context)));
++    } catch {
++      /* Paging is best-effort; the button stays for a retry. */
++    } finally {
++      loadingEarlierRef.current = false;
++      if (pagingControllerRef.current === controller) pagingControllerRef.current = null;
++      if (!controller.signal.aborted) setLoadingEarlier(false);
++    }
++  }, [oldestEntryId, sessionId]);
++
++  const handleScroll = useCallback(() => {
++    const el = listRef.current;
++    if (!el) return;
++    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
++  }, []);
++  useLayoutEffect(() => {
++    const el = listRef.current;
++    const anchor = prependAnchorRef.current;
++    prependAnchorRef.current = null;
++    if (!el) return;
++    if (anchor !== null) el.scrollTop = el.scrollHeight - anchor;
++    else if (stickToBottomRef.current) el.scrollTop = el.scrollHeight;
++  }, [messages]);
++
++  const toolResults = useMemo(() => buildToolResultsMap(messages), [messages]);
++  return (
++    <div className="chat-content" style={{ height: "100%", display: "flex", flexDirection: "column", minWidth: 0 }}>
++      <div ref={listRef} onScroll={handleScroll} style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "10px 0" }}>
++        {(notFound || error) && <div role="alert" style={{ padding: "12px", color: "var(--text-muted)", fontSize: 12 }}>
++          {notFound ? "会话记录尚未就绪" : `读取会话记录失败：${error}`}
++          {" "}<button type="button" onClick={() => setRefreshKey((key) => key + 1)}>重试</button>
++        </div>}
++        {hasMore && <div style={{ display: "flex", justifyContent: "center", padding: "4px 0 10px" }}>
++          <button type="button" onClick={loadEarlier} disabled={loadingEarlier}>加载更早记录</button>
++        </div>}
++        {messages.map((message, index) => (
++          <div key={entryIds[index] ?? index} style={{ padding: "2px 12px" }}>
++            <MessageView message={message} toolResults={toolResults} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryIds[index]} />
++          </div>
++        ))}
++        {messages.length === 0 && !error && !notFound && <div style={{ padding: "24px 16px", color: "var(--text-dim)", fontSize: 12, textAlign: "center" }}>暂无会话记录</div>}
++      </div>
++    </div>
++  );
++}
+diff --git a/components/workbot-transcript-state.ts b/components/workbot-transcript-state.ts
+new file mode 100644
+index 0000000..c56098d
+--- /dev/null
++++ b/components/workbot-transcript-state.ts
+@@ -0,0 +1,56 @@
++import type { AgentMessage, ToolResultMessage } from "@/lib/types";
++
++/** One page of `GET /api/sessions/[id]/context`, or what the viewer holds. */
++export interface SubagentTranscript {
++  messages: AgentMessage[];
++  entryIds: string[];
++  oldestEntryId: string | null;
++  hasMore: boolean;
++}
++
++export const EMPTY_TRANSCRIPT: SubagentTranscript = { messages: [], entryIds: [], oldestEntryId: null, hasMore: false };
++
++/** Same pairing the main chat builds: a tool result keyed by its tool call. */
++export function buildToolResultsMap(messages: readonly AgentMessage[]): Map<string, ToolResultMessage> {
++  const map = new Map<string, ToolResultMessage>();
++  for (const message of messages) {
++    if (message.role === "toolResult") map.set(message.toolCallId, message);
++  }
++  return map;
++}
++
++/**
++ * Folds a fresh tail page (a poll) into what the viewer holds. Older pages the
++ * user loaded stay when the tail overlaps them; otherwise (more new entries
++ * than one page, another branch) the tail replaces them. Entries never change
++ * once appended, so a message already shown keeps its object and MessageView's
++ * memo skips it.
++ */
++export function mergeTailPage(current: SubagentTranscript, page: SubagentTranscript): SubagentTranscript {
++  const known = new Map<string, AgentMessage>();
++  current.entryIds.forEach((id, index) => known.set(id, current.messages[index]));
++  const messages = page.messages.map((message, index) => known.get(page.entryIds[index]) ?? message);
++  const start = page.hasMore && page.entryIds.length ? current.entryIds.indexOf(page.entryIds[0]) : -1;
++  if (start < 0) return { ...page, messages };
++  return {
++    messages: [...current.messages.slice(0, start), ...messages],
++    entryIds: [...current.entryIds.slice(0, start), ...page.entryIds],
++    oldestEntryId: current.oldestEntryId,
++    hasMore: current.hasMore,
++  };
++}
++
++/**
++ * Prepends an older page asked for with `before: cursor`. A poll that replaced
++ * the transcript in between moved the cursor, and the page no longer joins on:
++ * it is dropped, never prepended over a gap or twice.
++ */
++export function prependOlderPage(current: SubagentTranscript, cursor: string, page: SubagentTranscript): SubagentTranscript {
++  if (current.oldestEntryId !== cursor) return current;
++  return {
++    messages: [...page.messages, ...current.messages],
++    entryIds: [...page.entryIds, ...current.entryIds],
++    oldestEntryId: page.oldestEntryId,
++    hasMore: page.hasMore,
++  };
++}
+diff --git a/app/api/workbot-terminal/theme/route.ts b/app/api/workbot-terminal/theme/route.ts
+new file mode 100644
+index 0000000..7fc41b6
+--- /dev/null
++++ b/app/api/workbot-terminal/theme/route.ts
+@@ -0,0 +1,22 @@
++import { NextResponse } from "next/server";
++import { syncTerminalTheme, terminalEnabled } from "@/lib/workbot-terminal";
++
++export const dynamic = "force-dynamic";
++export const runtime = "nodejs";
++
++// Uses the same /api authentication and same-origin checks as terminal launch.
++export async function POST(req: Request) {
++  if (!terminalEnabled()) return NextResponse.json({ error: "独立终端未启用" }, { status: 403 });
++  const body: unknown = await req.json().catch(() => null);
++  if (!body || typeof body !== "object" || !("key" in body) || typeof body.key !== "string"
++    || !/^[a-f0-9]{32}$/.test(body.key) || !("theme" in body)
++    || (body.theme !== "dark" && body.theme !== "light")) {
++    return NextResponse.json({ error: "无效的终端主题请求" }, { status: 400 });
++  }
++  try {
++    await syncTerminalTheme(body.key, body.theme);
++    return new Response(null, { status: 204 });
++  } catch {
++    return NextResponse.json({ error: "终端主题同步失败，请重新连接" }, { status: 503 });
++  }
++}
+diff --git a/lib/workbot-terminal-theme.test.mjs b/lib/workbot-terminal-theme.test.mjs
+new file mode 100644
+index 0000000..0e10229
+--- /dev/null
++++ b/lib/workbot-terminal-theme.test.mjs
+@@ -0,0 +1,277 @@
++import assert from 'node:assert/strict'
++import { readFileSync } from 'node:fs'
++import { Script, createContext } from 'node:vm'
++import { promisify } from 'node:util'
++import { execFile } from 'node:child_process'
++import { mkdtemp, mkdir, rm } from 'node:fs/promises'
++import { join } from 'node:path'
++import test from 'node:test'
++import ts from 'typescript'
++import { NextResponse } from 'next/server'
++import { TERMINAL_XTERM_THEMES } from './terminal-theme.ts'
++import { createTerminalThemeSync, createTerminalThemeTracker, terminalThemeReport } from './workbot-terminal-theme.ts'
++
++function loadModule(path, dependencies, globals = {}) {
++  const context = createContext({ exports: {}, require: (name) => {
++    if (!(name in dependencies)) throw new Error(`Unexpected import: ${name}`)
++    return dependencies[name]
++  }, ...globals })
++  new Script(ts.transpileModule(readFileSync(new URL(path, import.meta.url), 'utf8'), {
++    compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS },
++  }).outputText).runInContext(context)
++  return context.exports
++}
++
++const key = 'a'.repeat(32)
++
++test('both pages initialize and reconnect without reports; only connected theme changes notify', async () => {
++  const terminal = { options: {} }
++  const reports = []
++  const errors = []
++  const sync = createTerminalThemeSync(terminal, 'dark', (theme) => { reports.push(theme) }, (error) => errors.push(error))
++  await sync.setTheme('dark')
++  sync.setConnected(true)
++  await sync.setTheme('dark')
++  sync.setConnected(false)
++  sync.setConnected(true)
++  await Promise.resolve()
++  assert.deepEqual(reports, [], 'startup, refresh and reconnect must not write terminal input')
++
++  await sync.setTheme('light')
++  await sync.setTheme('light')
++  assert.equal(terminal.options.theme.background, TERMINAL_XTERM_THEMES.light.background)
++  assert.deepEqual(reports, ['light'])
++  sync.setConnected(false)
++  await sync.setTheme('dark')
++  sync.setConnected(true)
++  await sync.setTheme('dark')
++  assert.deepEqual(reports, ['light'], 'offline changes are not replayed as input')
++  await sync.setTheme('light')
++  await sync.setTheme('dark')
++  assert.deepEqual(reports, ['light', 'light', 'dark'])
++  sync.dispose()
++  await sync.setTheme('light')
++  assert.deepEqual(reports, ['light', 'light', 'dark'])
++  assert.deepEqual(errors, [])
++})
++
++test('rapid switches serialize delivery and a failed request does not block the next switch', async () => {
++  const reports = []
++  const errors = []
++  let release
++  const gate = new Promise((resolve) => { release = resolve })
++  const sync = createTerminalThemeSync({ options: {} }, 'dark', async (theme) => {
++    reports.push(theme)
++    if (reports.length === 1) { await gate; throw new Error('offline') }
++  }, (error) => errors.push(error.message))
++  sync.setConnected(true)
++  const first = sync.setTheme('light')
++  await Promise.resolve()
++  const last = sync.setTheme('dark')
++  assert.deepEqual(reports, ['light'])
++  release()
++  await Promise.all([first, last])
++  assert.deepEqual(reports, ['light', 'dark'])
++  assert.deepEqual(errors, [], 'a superseded failure must not overwrite the current UI')
++  sync.dispose()
++})
++
++test('native theme subscription survives split PTY output and ignores ordinary shell text', () => {
++  const enable = '\x1b[?2004;2031h'
++  for (let split = 0; split <= enable.length; split++) {
++    const tracker = createTerminalThemeTracker()
++    tracker.write('shell$ 2031h')
++    assert.equal(tracker.enabled, false)
++    tracker.write(enable.slice(0, split))
++    tracker.write(enable.slice(split))
++    assert.equal(tracker.enabled, true)
++    tracker.write('output'.repeat(30_000))
++    assert.equal(tracker.enabled, true)
++    tracker.write('\x1b[?2031l')
++    assert.equal(tracker.enabled, false)
++    tracker.write(enable + '\x1bc')
++    assert.equal(tracker.enabled, false)
++  }
++})
++
++test('built-in PTY sends reports only to subscribed applications, even after history rolls over', async () => {
++  const writes = []
++  let output
++  const pty = {
++    onData(listener) { output = listener }, onExit() {},
++    write(data) { writes.push(data) }, resize() {}, kill() {},
++  }
++  const manager = loadModule('./terminal-manager.ts', {
++    crypto: { randomUUID: () => 'fixture' }, os: { homedir: () => '/tmp' },
++    '@earendil-works/pi-coding-agent': {}, './paths': { samePath: (a, b) => a === b },
++    './terminal-bun-pty': { spawnBunPty: () => pty },
++    './workbot-terminal-theme': { createTerminalThemeTracker, terminalThemeReport },
++  }, { Bun: {}, process: { env: {}, platform: 'linux', once() {} }, setTimeout, clearTimeout })
++  const id = manager.createTerminal('/tmp', 80, 24)
++  try {
++    manager.syncTerminalTheme(id, 'light')
++    assert.deepEqual(writes, [], 'plain shells must not receive theme control sequences')
++    output('\x1b[?20')
++    output('31h')
++    assert.deepEqual(writes, [], 'enabling a mode is not a user theme change')
++    manager.syncTerminalTheme(id, 'dark')
++    assert.deepEqual(writes, [terminalThemeReport('dark')])
++    output('x'.repeat(140_000))
++    const replay = manager.subscribeTerminal(id, () => {})
++    assert.equal(replay.output.data.includes('2031h'), false)
++    manager.syncTerminalTheme(id, 'light')
++    assert.deepEqual(writes, [terminalThemeReport('dark'), terminalThemeReport('light')])
++    replay.unsubscribe()
++    output('\x1b[?2031l')
++    manager.syncTerminalTheme(id, 'dark')
++    assert.equal(writes.length, 2, 'returning to a shell must disable notifications')
++  } finally {
++    manager.killTerminal(id, true)
++  }
++})
++
++test('theme sync updates only the managed pane before notifying Pi, without sending Web credentials', async () => {
++  const calls = []
++  let modes = '-echo -icanon'
++  const terminal = loadModule('./workbot-terminal.ts', {
++    'node:child_process': { execFile: (binary, args, options, done) => {
++      calls.push({ binary, args: [...args], options })
++      done(null, { stdout: binary === 'stty' ? modes : '/dev/pts/1\n', stderr: '' })
++    } },
++    'node:crypto': {}, 'node:fs/promises': {}, 'node:path': {},
++    'node:util': { promisify },
++    '@earendil-works/pi-coding-agent': {},
++    './terminal-theme': { TERMINAL_XTERM_THEMES },
++    './workbot-terminal-theme': { terminalThemeReport },
++  }, { process: { env: {
++    WORKBOT_TUI_ENABLED: '1', PI_WEB_PASSWORD: 'must-not-reach-tmux',
++    WORKBOT_TMUX_SOCKET: '/private/tui.sock', WORKBOT_TMUX_CONFIG: '/app/tmux.conf',
++  } } })
++
++  for (const theme of ['light', 'dark']) {
++    await terminal.syncTerminalTheme(key, theme)
++    const [style, tty, input] = calls.slice(-3)
++    const colors = TERMINAL_XTERM_THEMES[theme]
++    assert.equal(style.binary, 'tmux')
++    assert.deepEqual(style.args, [
++      '-S', '/private/tui.sock', '-f', '/app/tmux.conf',
++      'select-pane', '-t', `=pi-${key}:0.0`, '-P', `fg=${colors.foreground},bg=${colors.background}`,
++      ';', 'display-message', '-p', '-t', `=pi-${key}:0.0`, '#{pane_tty}',
++    ])
++    assert.equal(tty.binary, 'stty')
++    assert.deepEqual(tty.args, ['-F', '/dev/pts/1', '-a'])
++    assert.deepEqual(input.args.slice(4), ['send-keys', '-t', `=pi-${key}:0.0`, '-l', terminalThemeReport(theme)])
++    assert.ok([style, tty, input].every((call) => call.options.env.PI_WEB_PASSWORD === undefined))
++  }
++  await assert.rejects(terminal.syncTerminalTheme('-t other', 'dark'))
++  await assert.rejects(terminal.syncTerminalTheme(key, 'invalid'))
++  assert.equal(calls.length, 6)
++  for (modes of ['echo icanon', '-echo icanon', 'echo -icanon']) {
++    calls.length = 0
++    await terminal.syncTerminalTheme(key, 'dark')
++    assert.deepEqual(calls.map((call) => call.binary), ['tmux', 'stty'], 'startup must not receive a report before raw/no-echo mode')
++  }
++})
++
++test('theme route validates input, refuses disabled terminals, and reports missing panes without leaking errors', async () => {
++  const calls = []
++  let enabled = true
++  let fail = false
++  const route = loadModule('../app/api/workbot-terminal/theme/route.ts', {
++    'next/server': { NextResponse },
++    '@/lib/workbot-terminal': {
++      terminalEnabled: () => enabled,
++      syncTerminalTheme: async (...args) => {
++        calls.push(args)
++        if (fail) throw new Error('private socket path')
++      },
++    },
++  }, { Response })
++  const request = (body) => new Request('http://localhost/api/workbot-terminal/theme', {
++    method: 'POST', body: JSON.stringify(body),
++  })
++
++  for (const body of [null, [], {}, { key: '-t other', theme: 'dark' },
++    { key: 'a'.repeat(31), theme: 'dark' }, { key, theme: 'system' }, { key, theme: 1 }]) {
++    assert.equal((await route.POST(request(body))).status, 400)
++  }
++  assert.equal((await route.POST(new Request('http://localhost', { method: 'POST', body: '{' }))).status, 400)
++  enabled = false
++  assert.equal((await route.POST(request({ key, theme: 'dark' }))).status, 403)
++  assert.equal(calls.length, 0)
++
++  enabled = true
++  assert.equal((await route.POST(request({ key, theme: 'light' }))).status, 204)
++  assert.deepEqual(calls, [[key, 'light']])
++  fail = true
++  const response = await route.POST(request({ key, theme: 'dark' }))
++  assert.equal(response.status, 503)
++  assert.doesNotMatch(await response.text(), /private socket path/)
++})
++
++test('real Pi repaints existing user blocks in both directions and retains the draft and process', {
++  skip: !Bun.which('tmux'), timeout: 30_000,
++}, async () => {
++  const { SessionManager, getPackageDir } = await import('@earendil-works/pi-coding-agent')
++  const { syncTerminalTheme } = await import('./workbot-terminal.ts')
++  const root = await mkdtemp('/tmp/workbot-theme-')
++  const savedEnv = { ...process.env }
++  const exec = promisify(execFile)
++  const socket = join(root, 'tmux.sock')
++  const target = `=pi-${key}:0.0`
++  const tmux = async (...args) => (await exec('tmux', ['-S', socket, '-f', '/dev/null', ...args], {
++    env: process.env, timeout: 10_000,
++  })).stdout
++  let screen = ''
++  async function waitFor(label, check) {
++    const deadline = Date.now() + 10_000
++    while (Date.now() < deadline) {
++      screen = await tmux('capture-pane', '-ep', '-t', target)
++      if (check(screen)) return
++      await Bun.sleep(25)
++    }
++    throw new Error(`${label} timed out: ${JSON.stringify(screen)}`)
++  }
++  function userBackground(output) {
++    const end = output.indexOf('theme-user-message')
++    if (end < 0) return
++    const color = [...output.slice(0, end).matchAll(/\x1b\[[\d;]*48;2;(\d+);(\d+);(\d+)m/g)].at(-1)
++    return color && color.slice(1).map(Number)
++  }
++  try {
++    process.env = {
++      PATH: savedEnv.PATH, HOME: root, PI_CODING_AGENT_DIR: join(root, 'pi'),
++      PI_OFFLINE: '1', PI_TELEMETRY: '0', TERM: 'tmux-256color', COLORTERM: 'truecolor',
++      WORKBOT_TUI_ENABLED: '1', PI_WEB_PASSWORD: 'fixture-only',
++      WORKBOT_TMUX_SOCKET: socket, WORKBOT_TMUX_CONFIG: '/dev/null',
++    }
++    await mkdir(process.env.PI_CODING_AGENT_DIR, { recursive: true })
++    await Bun.write(join(process.env.PI_CODING_AGENT_DIR, 'settings.json'), JSON.stringify({
++      packages: [], theme: 'system', defaultProjectTrust: 'yes',
++    }))
++    const session = SessionManager.create(root, join(root, 'sessions'))
++    session.appendMessage({ role: 'user', content: 'theme-user-message', timestamp: Date.now() })
++    await tmux('new-session', '-d', '-x', '100', '-y', '40', '-s', `pi-${key}`, '--',
++      process.execPath, join(getPackageDir(), 'dist/bundle/cli.js'),
++      '--no-extensions', '--session', session.getSessionFile())
++    await waitFor('Pi startup', (output) => output.includes('theme-user-message'))
++    const pid = await tmux('display-message', '-p', '-t', target, '#{pane_pid}')
++    await tmux('send-keys', '-t', target, '-l', 'unsent-draft')
++    await waitFor('draft input', (output) => output.includes('unsent-draft'))
++    for (const theme of ['light', 'dark', 'light']) {
++      await syncTerminalTheme(key, theme)
++      await waitFor(`${theme} user background`, (output) => {
++        const rgb = userBackground(output)
++        return rgb && (theme === 'light' ? Math.min(...rgb) > 200 : Math.max(...rgb) < 100)
++      })
++      const rgb = userBackground(screen)
++      assert.ok(theme === 'light' ? Math.min(...rgb) > 200 : Math.max(...rgb) < 100)
++      assert.match(screen, /unsent-draft/)
++      assert.equal(await tmux('display-message', '-p', '-t', target, '#{pane_pid}'), pid)
++    }
++  } finally {
++    await tmux('kill-server').catch(() => {})
++    process.env = savedEnv
++    await rm(root, { recursive: true, force: true })
++  }
++})
+diff --git a/app/api/terminal/[id]/route.ts b/app/api/terminal/[id]/route.ts
+index 0ef9f2c..8420219 100644
+--- a/app/api/terminal/[id]/route.ts
++++ b/app/api/terminal/[id]/route.ts
+@@ -1,5 +1,5 @@
+ import { NextResponse } from "next/server";
+-import { getTerminalCwd, killTerminal, resizeTerminal, writeTerminal } from "@/lib/terminal-manager";
++import { getTerminalCwd, killTerminal, resizeTerminal, syncTerminalTheme, writeTerminal } from "@/lib/terminal-manager";
+
+ export const dynamic = "force-dynamic";
+ export const runtime = "nodejs";
+@@ -18,16 +18,24 @@ export async function POST(
+ ) {
+   try {
+     const { id } = await params;
+-    const body = await req.json() as { type?: unknown; data?: unknown; cols?: unknown; rows?: unknown };
+-    if (body.type === "input" && typeof body.data === "string" && body.data.length <= 64 * 1024) {
++    const body: unknown = await req.json().catch(() => null);
++    if (!body || typeof body !== "object" || !("type" in body))
++      return NextResponse.json({ error: "Invalid terminal command" }, { status: 400 });
++    if (body.type === "theme" && "theme" in body && (body.theme === "dark" || body.theme === "light")) {
++      return syncTerminalTheme(id, body.theme)
++        ? NextResponse.json({ success: true })
++        : NextResponse.json({ error: "Terminal not found" }, { status: 404 });
++    }
++    if (body.type === "input" && "data" in body && typeof body.data === "string" && body.data.length <= 64 * 1024) {
+       return writeTerminal(id, body.data)
+         ? NextResponse.json({ success: true })
+         : NextResponse.json({ error: "Terminal not found" }, { status: 404 });
+     }
+-    if (body.type === "resize" && Number.isInteger(body.cols) && Number.isInteger(body.rows)
+-      && (body.cols as number) >= 2 && (body.cols as number) <= 1000
+-      && (body.rows as number) >= 1 && (body.rows as number) <= 1000) {
+-      return resizeTerminal(id, body.cols as number, Math.max(2, body.rows as number))
++    if (body.type === "resize" && "cols" in body && "rows" in body
++      && typeof body.cols === "number" && typeof body.rows === "number"
++      && Number.isInteger(body.cols) && Number.isInteger(body.rows)
++      && body.cols >= 2 && body.cols <= 1000 && body.rows >= 1 && body.rows <= 1000) {
++      return resizeTerminal(id, body.cols, Math.max(2, body.rows))
+         ? NextResponse.json({ success: true })
+         : NextResponse.json({ error: "Terminal not found" }, { status: 404 });
+     }
+diff --git a/lib/terminal-client.ts b/lib/terminal-client.ts
+index 48451de..41e12f2 100644
+--- a/lib/terminal-client.ts
++++ b/lib/terminal-client.ts
+@@ -1,3 +1,5 @@
++import type { TerminalTheme } from './terminal-theme';
++
+ export async function terminalRequest(path: string, options?: RequestInit): Promise<{ id?: string; cwd?: string }> {
+   const response = await fetch(path, { ...options, signal: AbortSignal.timeout(15_000) });
+   const data = await response.json().catch(() => {
+@@ -27,6 +29,7 @@ export function createTerminalWriter(id: string, onError: (error: Error) => void
+       stopped = true;
+       onError(error);
+     });
++    return pending;
+   };
+   return {
+     write(data: string) {
+@@ -43,6 +46,10 @@ export function createTerminalWriter(id: string, onError: (error: Error) => void
+       bufferedInput = null;
+       enqueue({ type: "resize", cols, rows });
+     },
++    theme(theme: TerminalTheme) {
++      bufferedInput = null;
++      return enqueue({ type: "theme", theme });
++    },
+     stop() { stopped = true; bufferedInput = null; return pending; },
+   };
+ }
+diff --git a/lib/workbot-terminal-theme.ts b/lib/workbot-terminal-theme.ts
+new file mode 100644
+index 0000000..16e38a9
+--- /dev/null
++++ b/lib/workbot-terminal-theme.ts
+@@ -0,0 +1,63 @@
++import type { Terminal } from '@xterm/xterm'
++import { TERMINAL_XTERM_THEMES, type TerminalTheme } from './terminal-theme'
++
++export function terminalThemeReport(theme: TerminalTheme): string {
++  return `\x1b[?997;${theme === 'light' ? 2 : 1}n`
++}
++
++/** Shared by both pages; transports only deliver the selected theme to their PTY. */
++export function createTerminalThemeSync(
++  terminal: Pick<Terminal, 'options'>,
++  initialTheme: TerminalTheme,
++  send: (theme: TerminalTheme) => void | Promise<void>,
++  onError: (error: Error) => void,
++) {
++  let theme = initialTheme
++  let connected = false
++  let disposed = false
++  let revision = 0
++  let pending = Promise.resolve()
++  function sync() {
++    const current = ++revision
++    pending = pending.then(async () => {
++      if (disposed || !connected || current !== revision || !theme) return
++      await send(theme)
++    }).catch((error) => {
++      if (!disposed && current === revision) onError(error instanceof Error ? error : new Error(String(error)))
++    })
++    return pending
++  }
++  return {
++    setTheme(next: TerminalTheme) {
++      terminal.options.theme = TERMINAL_XTERM_THEMES[next]
++      if (theme === next) return pending
++      theme = next
++      return connected ? sync() : pending
++    },
++    // Connecting/restoring a terminal is not a user theme change. Never send input here.
++    setConnected(next: boolean) {
++      connected = next
++      if (!next) revision++
++    },
++    dispose() { disposed = true; revision++ },
++  }
++}
++
++/** Keep DEC mode 2031 independently of the bounded replay buffer. Shells never opt in. */
++export function createTerminalThemeTracker() {
++  let enabled = false
++  let partial = ''
++  return {
++    get enabled() { return enabled },
++    write(data: string) {
++      const input = partial + data
++      for (const match of input.matchAll(/\x1bc|\x1b\[\?([\d;]+)([hl])/g)) {
++        if (match[0] === '\x1bc') enabled = false
++        else if (match[1].split(';').includes('2031')) enabled = match[2] === 'h'
++      }
++      // Only an incomplete escape sequence can straddle PTY chunks, never retain output history.
++      const tail = input.slice(input.lastIndexOf('\x1b'))
++      partial = tail.length <= 128 && /^\x1b(?:\[\??[\d;]*)?$/.test(tail) ? tail : ''
++    },
++  }
++}

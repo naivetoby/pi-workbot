@@ -1,0 +1,13 @@
+.git
+node_modules
+**/node_modules
+configs/*/npm/*
+!configs/*/npm/package.json
+!configs/*/npm/bun.lock
+.cache
+.runtime
+.env
+.env.*
+**/.env
+**/.env.*
+deploy

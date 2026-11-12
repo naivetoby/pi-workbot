@@ -1,0 +1,10 @@
+{
+  "name": "pi-extensions",
+  "private": true,
+  "dependencies": {
+    "pi-web-access": "0.47.0",
+    "pi-subagents": "0.87.0",
+    "@juicesharp/rpiv-todo": "2.15.0",
+    "pi-lens": "4.4.11"
+  }
+}

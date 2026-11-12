@@ -1,0 +1,5 @@
+#!/bin/sh
+case "$1" in
+  *sername*) printf '%s\n' oauth2 ;;
+  *) printf '%s\n' "$GITLAB_TOKEN" ;;
+esac

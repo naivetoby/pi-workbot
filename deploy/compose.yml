@@ -1,0 +1,57 @@
+name: pi-workbot-standalone
+services:
+  chat:
+    image: pi-workbot/chat:local
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: chat
+      pull: true
+      args:
+        BASE_IMAGE: '${WORKBOT_BASE_IMAGE:-naivetoby/pi-workbot-dev:latest}'
+    pull_policy: never
+    init: true
+    restart: unless-stopped
+    environment:
+      - WORKBOT_ROLE=chat
+      - PI_CODING_AGENT_DIR=/runtime/pi
+      - WORKBOT_WORKSPACE=/workspace
+      - WORKBOT_PROJECTS_FILE=/opt/workbot/configs/projects.json
+      - WORKBOT_CONTROL_PROJECT
+      - GITLAB_HOST
+      - GITLAB_TOKEN
+      - OPENAI_RELAY_BASE_URL
+      - OPENAI_RELAY_API_KEY
+      - DEEPSEEK_API_KEY
+      - FEISHU_APP_ID
+      - FEISHU_APP_SECRET
+      - WECOM_BOT_ID
+      - WECOM_BOT_SECRET
+      - WECOM_BOT_URL
+      - WORKBOT_CODE_REF
+      - WORKBOT_WEB_AUTOSTART
+      - WORKBOT_TUI_ENABLED
+      - PI_WEB_HOSTNAME=0.0.0.0
+      - PORT=30141
+      - PI_WEB_PASSWORD=${PI_WEB_PASSWORD:?请先在 deploy/.env 中设置 Web 登录密码}
+      - PI_WEB_ALLOWED_HOSTS
+    volumes:
+      - chat-sessions:/runtime/pi/sessions
+      - ./projects.json:/opt/workbot/configs/projects.json:ro
+      - ./chat/AGENTS.md:/opt/workbot/configs/chat/AGENTS.md:ro
+    ports:
+      - '${WORKBOT_WEB_BIND:-127.0.0.1}:${WORKBOT_WEB_PORT:-30141}:30141'
+    healthcheck:
+      test: [CMD-SHELL, 'test -f /runtime/healthy']
+      interval: 30s
+      timeout: 5s
+      start_period: 5m
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+volumes:
+  chat-sessions:

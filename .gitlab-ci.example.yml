@@ -1,0 +1,247 @@
+# 使用 GitLab 部署时，复制为 .gitlab-ci.yml 并按环境调整。
+stages: [check, build, work, deploy, notice]
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "api" && $MODE == "code"'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - when: never
+
+default:
+  image: '$WORKBOT_CI_IMAGE'
+  tags: ['$WORKBOT_BUILD_RUNNER']
+
+variables:
+  PI_OFFLINE: '1'
+  PI_TELEMETRY: '0'
+  WORKBOT_CI_IMAGE: docker:cli
+  WORKBOT_BASE_IMAGE: naivetoby/pi-workbot-dev:latest
+  WORKBOT_BUILD_RUNNER: pi-workbot-build
+  WORKBOT_CHAT_RUNNER: pi-workbot-chat
+  WORKBOT_CODE_RUNNER: pi-workbot-code
+
+check:
+  stage: check
+  image: '$WORKBOT_BASE_IMAGE'
+  tags: ['$WORKBOT_CODE_RUNNER']
+  rules:
+    - if: '$MODE != "code"'
+  script:
+    - bun install --frozen-lockfile --ignore-scripts
+    - bun run check
+    - bun run smoke
+
+check-assets:
+  stage: check
+  image: '$WORKBOT_BASE_IMAGE'
+  tags: ['$WORKBOT_CODE_RUNNER']
+  rules:
+    - if: '$MODE != "code"'
+      changes:
+        - configs/**/*
+        - scripts/prepare-pi.ts
+        - scripts/smoke-assets.ts
+        - src/**/*
+        - package.json
+        - bun.lock
+        - bunfig.toml
+        - Dockerfile
+        - .dockerignore
+        - .gitlab-ci.yml
+        - .gitlab-ci.example.yml
+  script:
+    - bun install --frozen-lockfile --ignore-scripts
+    - bun run check:assets
+
+check-web:
+  stage: check
+  image: '$WORKBOT_BASE_IMAGE'
+  tags: ['$WORKBOT_CODE_RUNNER']
+  rules:
+    - if: '$MODE != "code"'
+      changes:
+        - web/**/*
+        - terminal/**/*
+        - configs/tmux.conf
+        - bin/workbot-tui-attach
+        - scripts/prepare-web.ts
+        - scripts/prepare-tui.ts
+        - scripts/smoke-tui.ts
+        - test/fixtures/tui-browser.mjs
+        - scripts/smoke.ts
+        - src/chat/**/*
+        - src/runtime/**/*
+        - package.json
+        - bun.lock
+        - bunfig.toml
+        - Dockerfile
+        - .dockerignore
+        - .gitlab-ci.yml
+        - .gitlab-ci.example.yml
+  script:
+    - bun install --frozen-lockfile --ignore-scripts
+    - bun run check:web
+
+# 角色插件、LSP 和退出验收在禁网的 Linux 构建层执行，不发布候选镜像。
+check-lens:
+  stage: check
+  rules:
+    - if: '$MODE != "code"'
+      changes:
+        - configs/**/*
+        - src/**/*
+        - scripts/prepare-pi.ts
+        - scripts/smoke-assets.ts
+        - scripts/smoke-lens.ts
+        - test/fixtures/lens-*.ts
+        - package.json
+        - bun.lock
+        - bunfig.toml
+        - patches/**/*
+        - Dockerfile
+        - .dockerignore
+        - .gitlab-ci.yml
+        - .gitlab-ci.example.yml
+  before_script:
+    - >-
+      printf '%s' "$CI_JOB_TOKEN" |
+      docker login -u gitlab-ci-token --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build --pull --provenance=false --build-arg BASE_IMAGE="$WORKBOT_BASE_IMAGE" --target code .
+    - docker build --pull --provenance=false --build-arg BASE_IMAGE="$WORKBOT_BASE_IMAGE" --target chat-assets .
+
+# 使用与 chat 相同的 Linux 终端层，合并前验证真实进程与认证链路。
+check-tui:
+  stage: check
+  rules:
+    - if: '$MODE != "code"'
+      changes:
+        - web/**/*
+        - terminal/**/*
+        - configs/tmux.conf
+        - bin/workbot-tui-attach
+        - scripts/prepare-web.ts
+        - scripts/prepare-tui.ts
+        - scripts/smoke-tui.ts
+        - test/fixtures/tui-session-probe.ts
+        - src/chat/**/*
+        - src/runtime/**/*
+        - package.json
+        - bun.lock
+        - bunfig.toml
+        - patches/**/*
+        - Dockerfile
+        - .dockerignore
+        - .gitlab-ci.yml
+        - .gitlab-ci.example.yml
+  before_script:
+    - >-
+      printf '%s' "$CI_JOB_TOKEN" |
+      docker login -u gitlab-ci-token --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build --pull --provenance=false --build-arg BASE_IMAGE="$WORKBOT_BASE_IMAGE" --target tui-check .
+
+build-images:
+  stage: build
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "push" &&
+        $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - >-
+      printf '%s' "$CI_JOB_TOKEN" |
+      docker login -u gitlab-ci-token --password-stdin "$CI_REGISTRY"
+  script:
+    - >-
+      docker build --pull --provenance=false --build-arg BASE_IMAGE="$WORKBOT_BASE_IMAGE" --target code
+      -t "$CI_REGISTRY_IMAGE/code:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE/code:$CI_COMMIT_SHORT_SHA"
+    - >-
+      docker build --pull --provenance=false --build-arg BASE_IMAGE="$WORKBOT_BASE_IMAGE" --target chat
+      -t "$CI_REGISTRY_IMAGE/chat:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE/chat:$CI_COMMIT_SHORT_SHA"
+
+code:
+  stage: work
+  image: '$CI_REGISTRY_IMAGE/code:$CI_COMMIT_SHORT_SHA'
+  tags: ['$WORKBOT_CODE_RUNNER']
+  environment:
+    name: code
+    action: prepare
+  timeout: 1h
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "api" && $MODE == "code"'
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - cd /opt/workbot
+    - bun src/cli.ts code
+
+deploy-chat:
+  stage: deploy
+  tags: ['$WORKBOT_CHAT_RUNNER']
+  environment: chat
+  resource_group: chat
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "push" &&
+        $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - >-
+      printf '%s' "$CI_JOB_TOKEN" |
+      docker login -u gitlab-ci-token --password-stdin "$CI_REGISTRY"
+  script:
+    - docker compose pull chat
+    - |
+      if ! docker compose up --no-build --wait --wait-timeout 420 chat; then
+        docker compose ps --all chat || true
+        docker compose logs --no-color --tail 100 chat || true
+        exit 1
+      fi
+
+.notice:
+  stage: notice
+  image: '$WORKBOT_BASE_IMAGE'
+  tags: ['$WORKBOT_CODE_RUNNER']
+  environment:
+    name: notice
+    action: prepare
+  timeout: 5m
+  allow_failure: true
+
+notice-deploy:
+  extends: .notice
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "push" &&
+        $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_success
+  script:
+    - bun scripts/notice.ts deploy-success
+
+notice-deploy-failure:
+  extends: .notice
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "push" &&
+        $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_failure
+  script:
+    - bun scripts/notice.ts deploy-failure
+
+notice-code-success:
+  extends: .notice
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "api" && $MODE == "code"'
+      when: on_success
+  script:
+    - bun scripts/notice.ts code-success
+
+notice-code-failure:
+  extends: .notice
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "api" && $MODE == "code"'
+      when: on_failure
+  script:
+    - bun scripts/notice.ts code-failure

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "$comment": "Workbot 初始化时注入 OPENAI_RELAY_BASE_URL。两个 GPT 模型禁用 off/minimal；low/medium/high 沿用默认映射，xhigh/max 需显式启用。",
+  "providers": {
+    "openai-relay": {
+      "baseUrl": "${OPENAI_RELAY_BASE_URL}",
+      "api": "openai-responses",
+      "apiKey": "${OPENAI_RELAY_API_KEY}",
+      "models": [
+        {
+          "id": "gpt-6.1-sol",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "input": ["text", "image"]
+        },
+        {
+          "id": "gpt-6-astra",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "input": ["text", "image"]
+        }
+      ]
+    }
+  }
+}

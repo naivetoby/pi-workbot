@@ -1,0 +1,10 @@
+#!/bin/sh
+# ttyd URL arguments may select an existing terminal, never a command or path.
+set -eu
+[ "$#" -eq 1 ] || exit 64
+case "$1" in
+  *[!0-9a-f]*|'') exit 64 ;;
+esac
+[ "${#1}" -eq 32 ] || exit 64
+: "${WORKBOT_TMUX_SOCKET:?Missing dedicated tmux socket}"
+exec tmux -u -S "$WORKBOT_TMUX_SOCKET" attach-session -t "=pi-$1"

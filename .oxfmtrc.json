@@ -1,0 +1,11 @@
+{
+  "semi": false,
+  "singleQuote": true,
+  "ignorePatterns": [
+    ".cache/**",
+    ".runtime/**",
+    "web/bun.lock",
+    "configs/*/npm/**",
+    "configs/shared/skills/**"
+  ]
+}

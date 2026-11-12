@@ -1,0 +1,45 @@
+{
+  "defaultProvider": "openai-relay",
+  "defaultModel": "gpt-6.1-sol",
+  "defaultThinkingLevel": "high",
+  "hideThinkingBlock": false,
+  "packages": [
+    "npm:pi-web-access@0.47.0",
+    "npm:pi-subagents@0.87.0",
+    "npm:@juicesharp/rpiv-todo@2.15.0",
+    "npm:pi-lens@4.4.11",
+    "npm:@lhlyu/pi-kit@0.2.1",
+    "npm:pi-cc-extensions@1.0.16",
+    "npm:@narumitw/pi-usage@0.69.2"
+  ],
+  "npmCommand": ["bun"],
+  "defaultProjectTrust": "always",
+  "enableAnalytics": false,
+  "enableInstallTelemetry": false,
+  "pi-channels": {
+    "adapters": {
+      "feishu": {
+        "type": "feishu",
+        "appId": "${FEISHU_APP_ID}",
+        "appSecret": "${FEISHU_APP_SECRET}",
+        "eventMode": "websocket",
+        "respondToMentionsOnly": true,
+        "allowedSenderIds": []
+      },
+      "wecom": {
+        "type": "wecom",
+        "botId": "${WECOM_BOT_ID}",
+        "secret": "${WECOM_BOT_SECRET}",
+        "eventMode": "websocket",
+        "mentionName": "Pi Workbot",
+        "allowedSenderIds": []
+      }
+    },
+    "bridge": {
+      "enabled": true,
+      "persistSessions": false,
+      "timeoutMs": 1800000,
+      "commands": true
+    }
+  }
+}

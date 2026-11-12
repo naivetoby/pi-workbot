@@ -1,0 +1,55 @@
+{
+  "name": "pi-workbot",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "chat": "bun src/cli.ts chat",
+    "code": "bun src/cli.ts code",
+    "web": "bun src/cli.ts web",
+    "prepare:pi": "bun scripts/prepare-pi.ts",
+    "prepare:web": "bun scripts/prepare-web.ts",
+    "prepare:tui": "bun scripts/prepare-tui.ts",
+    "smoke:tui": "bun scripts/smoke-tui.ts",
+    "check:tui": "bun run prepare:tui && bun run build:web && bun run smoke:tui",
+    "build:web": "bun scripts/prepare-web.ts --build",
+    "test:web": "bun scripts/prepare-web.ts --test",
+    "check:web": "bun run build:web && bun run smoke --web",
+    "check:assets": "bun run prepare:pi configs/chat && bun run prepare:pi configs/code && bun run smoke:chat && bun run smoke:code",
+    "smoke": "bun scripts/smoke.ts",
+    "smoke:chat": "bun scripts/smoke-assets.ts chat",
+    "smoke:code": "bun scripts/smoke-assets.ts code",
+    "smoke:lens": "bun scripts/smoke-lens.ts",
+    "format": "oxfmt --write .",
+    "check": "oxfmt --check . && oxlint --deny-warnings src scripts test && tsc --noEmit && bun test"
+  },
+  "dependencies": {
+    "@amaster.ai/pi-channels": "0.1.38",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "typebox": "1.4.6"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.2",
+    "@types/bun": "1.4.4",
+    "oxfmt": "0.78.0",
+    "oxlint": "1.93.0",
+    "typescript": "7.0.2"
+  },
+  "overrides": {
+    "@earendil-works/pi-agent-core": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-codemode": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-mcp": "1.5.2",
+    "@earendil-works/pi-schema": "1.5.2",
+    "@earendil-works/pi-telemetry": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2"
+  },
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "patchedDependencies": {
+    "@amaster.ai/pi-channels@0.1.38": "patches/pi-channels-0.1.38.patch"
+  }
+}
