@@ -16,7 +16,7 @@ bun run check:web
 - `build:web`：补丁测试通过后，生成 Next.js 生产构建；生产服务由 Bun 启动。
 - `check:web`：执行生产构建（含补丁测试）和 Web smoke；CI 在相关路径发生变更时运行此命令。
 
-补丁测试单独使用 Bun 执行，不继承主项目的测试目录和 preload，不提供业务凭证。保留上游源码和格式，不为了统一主项目风格而大范围修改补丁。
+补丁测试按 `components/Workbot*.test.mjs`、`lib/workbot-*.test.mjs` 自动发现，每个文件使用独立 Bun 进程，隔离模块 mock、DOM 和 SDK 缓存，不继承主项目的测试目录、preload 或业务凭证。组件使用真实 React 的 `createRoot` / `act` 和 Happy DOM，不模拟 hooks；终端输入与渲染仍由真实浏览器验收补充。保留上游源码和格式，不为了统一主项目风格而大范围修改补丁。
 
 Workbot 通过 `src/chat/web.ts` 管理 Web 进程，操作方式见 [使用说明](../docs/使用.md#按需使用-web)。两套运行镜像均设置 `SHELL=/bin/bash`，让内置终端使用支持宽字符行编辑的 Bash，而不是 `/bin/sh`（dash）；否则汉字可能已删除，但回显只擦掉一列而留下残字。Web smoke 验证 Bash 启动；`test/fixtures/tui-input-browser.mjs` 另用真实 Bash PTY 和 xterm 屏幕验证候选汉字删除后的内容及光标位置。
 
@@ -44,6 +44,6 @@ Workbot 自身的补丁包括：
 
 1. 更新 `src/runtime/paths.ts` 中的 `WEB_COMMIT`，从 `https://codeload.github.com/agegr/pi-web/tar.gz/<commit>` 下载原始源码，替换本目录的 `pi-web-<commit>.tar.gz` 及同名 `.sha256` 校验文件（在本目录执行 `shasum -a 256 pi-web-<commit>.tar.gz > pi-web-<commit>.tar.gz.sha256`）。
 2. 核对并更新补丁、Pi 依赖版本和本目录的锁文件。
-3. 执行 `bun run check:web`，检查补丁测试、生产构建和 Web smoke；更新 Web、Pi 或终端适配时另跑 `bun run check:tui`，验证会话事件和启动兼容性。新增补丁测试须接入 `scripts/prepare-web.ts` 的执行入口。
+3. 执行 `bun run check:web`，检查补丁测试、生产构建和 Web smoke；更新 Web、Pi 或终端适配时另跑 `bun run check:tui`，验证会话事件和启动兼容性。新增补丁测试沿用上述命名模式即可接入执行入口，不单独维护文件清单。
 
 源码采用 MIT 许可，版权和许可见本目录 [LICENSE](LICENSE) 及源码包中的 LICENSE。

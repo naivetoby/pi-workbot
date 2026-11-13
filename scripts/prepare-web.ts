@@ -61,22 +61,16 @@ export async function prepareWeb(build = false, test = build): Promise<void> {
     ),
   )
   if (test) {
-    await step('Workbot Web 补丁测试', () =>
-      run(
-        [
-          process.execPath,
-          'test',
-          '--config=/dev/null',
-          './components/WorkbotTerminalAccess.test.mjs',
-          './lib/workbot-origin.test.mjs',
-          './lib/workbot-terminal-touch.test.mjs',
-          './lib/workbot-terminal-input.test.mjs',
-          './lib/workbot-terminal-theme.test.mjs',
-        ],
-        {
+    await step('Workbot Web 补丁测试', async () => {
+      const files = ['components/Workbot*.test.mjs', 'lib/workbot-*.test.mjs']
+        .flatMap((pattern) => [...new Bun.Glob(pattern).scanSync({ cwd: WEB_DIR })])
+        .sort()
+      if (!files.length) throw new Error('未找到 Workbot Web 补丁测试')
+      // 每个文件独立运行，避免模块 mock、DOM 和 SDK 缓存跨文件污染。
+      for (const file of files)
+        await run([process.execPath, 'test', '--config=/dev/null', `./${file}`], {
           cwd: WEB_DIR,
           inherit: true,
-          // 不继承主项目 bunfig 的 test.root/preload，也不提供业务凭证。
           env: {
             PATH: process.env.PATH,
             HOME: process.env.HOME,
@@ -84,9 +78,8 @@ export async function prepareWeb(build = false, test = build): Promise<void> {
             PI_OFFLINE: '1',
             PI_TELEMETRY: '0',
           },
-        },
-      ),
-    )
+        })
+    })
   }
   if (build) {
     await step('Next.js 生产编译', () =>

@@ -10,6 +10,7 @@ import { fixture, testEnvironment } from './helpers.ts'
 interface FixtureOptions {
   failBuild?: boolean
   failTest?: boolean
+  noTests?: boolean
   archiveState?: 'corrupt' | 'missing'
   skipTests?: boolean
   repeat?: boolean
@@ -64,7 +65,7 @@ async function webFixture(options: FixtureOptions) {
   )
   await Bun.write(
     join(upstream, 'components/WorkbotTerminalAccess.test.mjs'),
-    `import test from 'node:test'; import assert from 'node:assert/strict';\ntest('补丁行为 fixture', () => assert.ok(${!options.failTest}));\n`,
+    "import test from 'node:test'; test('组件 fixture', () => { globalThis.workbotFixture = true });\n",
   )
   await Bun.write(
     join(upstream, 'lib/workbot-origin.test.mjs'),
@@ -74,6 +75,12 @@ async function webFixture(options: FixtureOptions) {
     join(upstream, 'lib/workbot-terminal-touch.test.mjs'),
     "import test from 'node:test'; test('触摸滚动 fixture', () => {});\n",
   )
+  await Bun.write(
+    join(upstream, 'lib/workbot-new.test.mjs'),
+    `import test from 'node:test'; import assert from 'node:assert/strict';\ntest('新增补丁与进程隔离 fixture', () => { assert.equal(globalThis.workbotFixture, undefined); assert.ok(${!options.failTest}) });\n`,
+  )
+  if (options.noTests)
+    for (const dir of ['components', 'lib']) await rm(join(upstream, dir), { recursive: true })
   // 若没有显式加载根配置，安装将连接这个不可用的地址并失败。
   await Bun.write(join(upstream, 'bunfig.toml'), '[install]\nregistry = "http://127.0.0.1:1"\n')
   await Bun.write(join(upstream, 'fixture.txt'), 'before\n')
@@ -184,8 +191,8 @@ describe('Web 构建准备', () => {
     expect(await Bun.file(join(source, 'components/WorkbotTerminalAccess.tsx')).text()).toContain(
       '仅供查看，请回到${channel}回复。',
     )
-    expect(await Bun.file(join(source, 'components/WorkbotTerminalAccess.test.mjs')).exists()).toBe(
-      true,
+    expect(await Bun.file(join(source, 'components/AppShell.tsx')).text()).toMatch(
+      /<WorkbotTerminalAccess\b[^>]*>[\s\S]*?<ChatWindow\b[\s\S]*?<\/WorkbotTerminalAccess>/,
     )
     // 两个终端入口都必须挂载及清理兼容层，不能只让独立 helper 的测试通过。
     for (const component of ['TerminalPanel', 'WorkbotTui']) {
@@ -236,11 +243,19 @@ describe('Web 构建准备', () => {
     }, 15_000)
   }
 
-  it('默认构建在补丁测试失败时停止编译', async () => {
+  it('默认构建自动执行新增补丁测试，失败时停止编译', async () => {
     const result = await buildFixture({ failTest: true })
 
     expect(result.code).not.toBe(0)
     expect(result.stderr).toContain('Workbot Web 补丁测试失败')
+    expect(await Bun.file(join(result.source, '.next/BUILD_ID')).exists()).toBe(false)
+  }, 15_000)
+
+  it('没有发现补丁测试时拒绝继续编译，不把空集合视为通过', async () => {
+    const result = await buildFixture({ noTests: true })
+
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain('未找到 Workbot Web 补丁测试')
     expect(await Bun.file(join(result.source, '.next/BUILD_ID')).exists()).toBe(false)
   }, 15_000)
 

@@ -145,47 +145,6 @@ describe('chat Web 自动启动', () => {
       warning: false,
     },
     {
-      label: '企微凭证完整',
-      credentials: { WECOM_BOT_ID: 'fixture-bot', WECOM_BOT_SECRET: 'fixture-secret' },
-      names: ['wecom'],
-      warning: false,
-    },
-    {
-      label: '两个渠道凭证都完整',
-      credentials: {
-        FEISHU_APP_ID: 'fixture-app',
-        FEISHU_APP_SECRET: 'fixture-feishu-secret',
-        WECOM_BOT_ID: 'fixture-bot',
-        WECOM_BOT_SECRET: 'fixture-wecom-secret',
-      },
-      names: ['feishu', 'wecom'],
-      warning: false,
-    },
-    {
-      label: '飞书缺少密钥',
-      credentials: { FEISHU_APP_ID: 'fixture-private-app' },
-      names: [],
-      warning: true,
-    },
-    {
-      label: '飞书缺少 ID',
-      credentials: { FEISHU_APP_SECRET: 'fixture-private-secret' },
-      names: [],
-      warning: true,
-    },
-    {
-      label: '企微缺少密钥',
-      credentials: { WECOM_BOT_ID: 'fixture-private-bot' },
-      names: [],
-      warning: true,
-    },
-    {
-      label: '企微缺少 ID',
-      credentials: { WECOM_BOT_SECRET: 'fixture-private-secret' },
-      names: [],
-      warning: true,
-    },
-    {
       label: '飞书不完整不影响企微',
       credentials: {
         FEISHU_APP_SECRET: 'fixture-private-secret',
@@ -194,22 +153,6 @@ describe('chat Web 自动启动', () => {
       },
       names: ['wecom'],
       warning: true,
-    },
-    {
-      label: '企微不完整不影响飞书',
-      credentials: {
-        FEISHU_APP_ID: 'fixture-app',
-        FEISHU_APP_SECRET: 'fixture-feishu-secret',
-        WECOM_BOT_ID: 'fixture-private-bot',
-      },
-      names: ['feishu'],
-      warning: true,
-    },
-    {
-      label: '空白凭证视为未设置',
-      credentials: { FEISHU_APP_ID: '  ', FEISHU_APP_SECRET: '\t' },
-      names: [],
-      warning: false,
     },
   ])(
     '$label - 只等待有效渠道，不因跳过渠道阻塞健康检查',

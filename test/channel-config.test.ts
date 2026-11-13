@@ -16,6 +16,53 @@ async function channelFixture() {
 }
 
 describe('渠道环境凭证', () => {
+  it.each([
+    {
+      name: '企微凭证完整',
+      credentials: { WECOM_BOT_ID: 'fixture-bot', WECOM_BOT_SECRET: 'fixture-secret' },
+      names: ['wecom'],
+    },
+    {
+      name: '两个渠道凭证完整',
+      credentials: {
+        FEISHU_APP_ID: 'fixture-app',
+        FEISHU_APP_SECRET: 'fixture-secret',
+        WECOM_BOT_ID: 'fixture-bot',
+        WECOM_BOT_SECRET: 'fixture-secret',
+      },
+      names: ['feishu', 'wecom'],
+    },
+    { name: '飞书缺少密钥', credentials: { FEISHU_APP_ID: 'fixture-app' }, names: [] },
+    { name: '飞书缺少 ID', credentials: { FEISHU_APP_SECRET: 'fixture-secret' }, names: [] },
+    { name: '企微缺少密钥', credentials: { WECOM_BOT_ID: 'fixture-bot' }, names: [] },
+    { name: '企微缺少 ID', credentials: { WECOM_BOT_SECRET: 'fixture-secret' }, names: [] },
+    {
+      name: '企微不完整不影响飞书',
+      credentials: {
+        FEISHU_APP_ID: 'fixture-app',
+        FEISHU_APP_SECRET: 'fixture-secret',
+        WECOM_BOT_ID: 'fixture-bot',
+      },
+      names: ['feishu'],
+    },
+    {
+      name: '空白凭证视为未设置',
+      credentials: { FEISHU_APP_ID: '  ', FEISHU_APP_SECRET: '\t' },
+      names: [],
+    },
+  ])('$name 时只启用有效渠道，且不回写凭证', async ({ credentials, names }) => {
+    const config = await channelFixture()
+    const file = Bun.file(join(config.piDir, 'settings.json'))
+    const before = await file.text()
+    Object.assign(process.env, credentials)
+
+    const active = loadChannelConfig(config.workspace)
+
+    expect(Object.keys(active.adapters ?? {})).toEqual([...names])
+    expect(await file.text()).toBe(before)
+    expect(await file.text()).not.toContain('fixture-secret')
+  })
+
   it('仅筛选有效配置，凭证变化后仍保留磁盘模板、白名单、模型和插件', async () => {
     const config = await channelFixture()
     const path = join(config.piDir, 'settings.json')

@@ -32,24 +32,25 @@ const config: Runtime = {
   sharedSource: join(root, 'shared'),
   projectsFile: join(root, 'projects.json'),
 }
-// 不读取仓库中可由维护者修改的插件或项目清单。
-await mkdir(config.sharedSource)
-await Bun.write(join(config.configSource, 'AGENTS.md'), '# 本机 smoke fixture\n')
-await Bun.write(config.projectsFile, '[]')
-await Bun.write(
-  join(config.configSource, 'settings.json'),
-  JSON.stringify({
-    defaultProvider: 'anthropic',
-    defaultModel: 'claude-sonnet-4-6',
-    npmCommand: ['bun'],
-    'pi-channels': { adapters: {}, bridge: { enabled: true, persistSessions: false } },
-  }),
-)
 try {
+  // 不读取仓库中可由维护者修改的插件或项目清单。
+  await mkdir(config.sharedSource)
+  await Bun.write(join(config.configSource, 'AGENTS.md'), '# 本机 smoke fixture\n')
+  await Bun.write(config.projectsFile, '[]')
+  await Bun.write(
+    join(config.configSource, 'settings.json'),
+    JSON.stringify({
+      defaultProvider: 'anthropic',
+      defaultModel: 'claude-sonnet-4-6',
+      npmCommand: ['bun'],
+      'pi-channels': { adapters: {}, bridge: { enabled: true, persistSessions: false } },
+    }),
+  )
   await initialize(config)
   const rpc = await run([process.execPath, PI_CLI, '--mode', 'rpc', '--no-session'], {
     cwd: config.workspace,
     input: '{"id":"state","type":"get_state"}\n{"id":"commands","type":"get_commands"}\n',
+    signal: AbortSignal.timeout(30_000),
   })
   const events = rpc
     .split('\n')
@@ -198,6 +199,9 @@ try {
     )
   }
 } finally {
-  await stopWeb(config)
-  await rm(root, { recursive: true, force: true })
+  try {
+    await stopWeb(config)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 }

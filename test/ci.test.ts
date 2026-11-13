@@ -41,16 +41,6 @@ async function pipeline(): Promise<Pipeline> {
 const deployCondition = '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
 
 describe('部署通知流水线', () => {
-  it('串行部署同一环境，等待健康并在失败时输出诊断且退出失败', async () => {
-    const deploy = (await pipeline())['deploy-chat']
-    expect(deploy.resource_group).toBe(deploy.environment)
-    const script = deploy.script.join('\n')
-    expect(script).toContain('--wait --wait-timeout 420 chat')
-    expect(script).toContain('docker compose ps --all chat')
-    expect(script).toContain('docker compose logs --no-color --tail 100 chat')
-    expect(script).toContain('exit 1')
-  })
-
   it.each([
     { name: '健康', fail: false },
     { name: '健康等待失败', fail: true },
@@ -67,7 +57,9 @@ if [ "$2" = up ] && [ "$WORKBOT_TEST_FAIL" = 1 ]; then exit 9; fi
 `,
     )
     await chmod(docker, 0o755)
-    const script = (await pipeline())['deploy-chat'].script.join('\n')
+    const deploy = (await pipeline())['deploy-chat']
+    expect(deploy.resource_group).toBe(deploy.environment)
+    const script = deploy.script.join('\n')
     const execution = run(['/bin/sh', '-ec', script], {
       env: testEnvironment({
         PATH: bin,

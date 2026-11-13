@@ -1,3 +1,14 @@
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -82,6 +82,7 @@
+     "ansi_up": "^6.0.6",
+     "eslint": "^9",
+     "eslint-config-next": "16.4.4",
++    "happy-dom": "21.0.4",
+     "jiti": "^2.7.0",
+     "katex": "^0.16.47",
+     "mammoth": "^1.12.0",
 diff --git a/app/api/sessions/[id]/terminal/route.ts b/app/api/sessions/[id]/terminal/route.ts
 new file mode 100644
 index 0000000..8bff70e
@@ -141,210 +152,92 @@ new file mode 100644
 index 0000000..821bb95
 --- /dev/null
 +++ b/components/WorkbotTerminalAccess.test.mjs
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,152 @@
 +import assert from "node:assert/strict";
-+import { readFileSync } from "node:fs";
-+import test from "node:test";
-+import { mock } from "bun:test";
-+import React from "react";
-+import { renderToStaticMarkup } from "react-dom/server";
-+import { Script, createContext } from "node:vm";
-+import ts from "typescript";
++import { afterAll, afterEach, test, mock, spyOn } from "bun:test";
++import React, { act } from "react";
++import { Window } from "happy-dom";
 +
-+// Keep this process-local mock at the transcript boundary, not the access guard.
-+const viewers = [];
-+mock.module("./WorkbotTranscript", () => ({
-+  WorkbotTranscript(props) {
-+    viewers.push(props);
-+    return React.createElement("div", { "data-read-only-transcript": true });
-+  },
-+}));
++// Each patch test file runs in its own process. Use real React effects and DOM;
++// only the unrelated message renderer and HTTP boundary are replaced.
++const window = new Window({ url: "http://localhost" });
++Object.assign(globalThis, { window, document: window.document, IS_REACT_ACT_ENVIRONMENT: true });
++const { createRoot } = await import("react-dom/client");
++mock.module("./MessageView", () => ({ MessageView: () => null }));
 +const { WorkbotTerminalAccess } = await import("./WorkbotTerminalAccess.tsx");
-+
-+function render(sessionPath, origin) {
-+  viewers.length = 0;
-+  let mounted = false;
-+  function Chat() {
-+    mounted = true;
-+    return React.createElement("textarea", { "aria-label": "Message" });
++const { WorkbotTranscript } = await import("./WorkbotTranscript.tsx");
++let root;
++afterEach(async () => {
++  try { if (root) await act(async () => root.unmount()); }
++  finally {
++    root = undefined;
++    document.body.replaceChildren();
++    delete document.visibilityState;
++    mock.restore();
 +  }
-+  const html = renderToStaticMarkup(React.createElement(
-+    WorkbotTerminalAccess,
-+    { session: { id: "fixture", path: sessionPath, name: "Fixture", origin }, running: false, onOpenFile() {} },
-+    React.createElement(Chat),
-+  ));
-+  return { html, mounted };
++});
++afterAll(() => window.happyDOM.close());
++
++const session = { id: "fixture", path: "/runtime/pi/sessions/web/chat.jsonl" };
++const guard = (value = session) => React.createElement(WorkbotTerminalAccess,
++  { session: value, running: false, onOpenFile() {} },
++  React.createElement("textarea", { "aria-label": "Message" }),
++);
++async function mount(element) {
++  const container = document.createElement("div");
++  document.body.append(container);
++  root = createRoot(container);
++  await act(async () => root.render(element));
++  return container;
 +}
 +
-+test("explicit IM origin uses the live read-only transcript regardless of file location", () => {
-+  for (const [adapter, label] of [["feishu", "飞书"], ["wecom", "企业微信"], ["custom-adapter", "IM"]]) {
-+    const { html, mounted } = render("/runtime/pi/sessions/--workspace--/chat.jsonl", { kind: "im", adapter });
-+    assert.equal(mounted, false, adapter);
-+    assert.doesNotMatch(html, /textarea|打开 TUI/);
-+    assert.ok(html.includes(`${label}会话 · 仅供查看，请回到${label}回复。`));
-+    assert.match(html, /data-read-only-transcript/);
-+    assert.equal(viewers.length, 1);
-+    assert.equal(viewers[0].sessionId, "fixture");
-+    assert.equal(viewers[0].running, true);
-+    assert.equal(viewers[0].pollMs, 10_000);
-+  }
++test.each([["feishu", "飞书"], ["wecom", "企业微信"], ["custom-adapter", "IM"]])(
++  "%s origin mounts only the live read-only transcript, regardless of file location",
++  async (adapter, label) => {
++    const requests = spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ context: { messages: [] } }));
++    const container = await mount(guard({ ...session, origin: { kind: "im", adapter } }));
++
++    assert.equal(container.querySelector("textarea"), null);
++    assert.ok(container.querySelector(".chat-content"));
++    assert.ok(container.textContent.includes(`${label}会话 · 仅供查看，请回到${label}回复。`));
++    assert.ok(!container.textContent.includes("打开 TUI"));
++    assert.equal(requests.mock.calls.length, 1);
++    assert.match(requests.mock.calls[0][0], /\/context\?/);
++  },
++);
++
++test.each([undefined, ""])("new session with path %j mounts chat without requesting terminal ownership", async (path) => {
++  const requests = spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected request"));
++  const container = await mount(guard({ ...session, path }));
++  assert.ok(container.querySelector("textarea"));
++  assert.equal(requests.mock.calls.length, 0);
 +});
-+
-+test("new sessions retain chat and normal Web sessions wait for terminal status", () => {
-+  for (const path of [undefined, ""]) {
-+    const { html, mounted } = render(path);
-+    assert.equal(mounted, true);
-+    assert.match(html, /textarea/);
-+  }
-+  for (const path of [
-+    "/runtime/pi/sessions/--workspace--/chat.jsonl",
-+    "/runtime/pi/sessions/im/chat.jsonl",
-+  ]) {
-+    const { html, mounted } = render(path);
-+    assert.equal(mounted, false);
-+    assert.equal(html, "", "ownership checks must not render a viewer or a visible loading notice");
-+    assert.equal(viewers.length, 0);
-+  }
-+});
-+
-+test("the access guard wraps the whole chat rather than only its input", () => {
-+  const source = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
-+  assert.match(source, /<WorkbotTerminalAccess\b[^>]*>[\s\S]*?<ChatWindow\b[\s\S]*?<\/WorkbotTerminalAccess>/);
-+});
-+
-+test("read-only transcripts use the same reactive font-size scope as GUI chat", async () => {
-+  // Load the real viewer in isolation from the guard's module mock above.
-+  const dependencies = {
-+    react: React,
-+    "./MessageView": { MessageView: () => null },
-+    "./workbot-transcript-state": await import("./workbot-transcript-state.ts"),
-+  };
-+  const context = createContext({ exports: {}, require: (name) => dependencies[name], React });
-+  new Script(ts.transpileModule(
-+    readFileSync(new URL("./WorkbotTranscript.tsx", import.meta.url), "utf8"),
-+    { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } },
-+  ).outputText).runInContext(context);
-+
-+  for (const running of [true, false]) {
-+    const html = renderToStaticMarkup(React.createElement(context.exports.WorkbotTranscript, {
-+      sessionId: "fixture", running, onOpenFile() {},
-+    }));
-+    assert.match(html, /^<div class="chat-content"/);
-+  }
-+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-+  assert.match(css, /\.chat-content\s*\{\s*--chat-font-size-offset:\s*calc\(var\(--chat-content-font-size, 14px\) - 14px\)/);
-+});
-+
-+// Run the real guard with local hook slots, following the upstream effect tests.
-+// Only React scheduling/browser events are replaced; requests and render decisions
-+// still execute the component body. No DOM package or model connection is needed.
-+const guardScript = new Script(ts.transpileModule(
-+  readFileSync(new URL("./WorkbotTerminalAccess.tsx", import.meta.url), "utf8"),
-+  { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } },
-+).outputText);
-+
-+function mountGuard(fetch) {
-+  const slots = [];
-+  let cursor = 0;
-+  let started = false;
-+  let effect;
-+  let cleanup;
-+  const window = new EventTarget();
-+  const document = Object.assign(new EventTarget(), { visibilityState: "visible" });
-+  const react = {
-+    ...React,
-+    useState(initial) {
-+      const index = cursor++;
-+      if (!(index in slots)) slots[index] = initial;
-+      return [slots[index], (value) => { slots[index] = typeof value === "function" ? value(slots[index]) : value; }];
-+    },
-+    useRef(initial) {
-+      const index = cursor++;
-+      return slots[index] ??= { current: initial };
-+    },
-+    useEffect(callback) { if (!started) effect = callback; },
-+  };
-+  const dependencies = {
-+    react,
-+    "react-dom": { flushSync: (callback) => callback() },
-+    "./WorkbotTranscript": { WorkbotTranscript: () => React.createElement("div", { "data-read-only-transcript": true }) },
-+  };
-+  const context = createContext({
-+    exports: {}, require: (name) => dependencies[name], React, fetch, AbortSignal,
-+    window, document, setInterval() { return 1; }, clearInterval() {},
-+  });
-+  guardScript.runInContext(context);
-+  const render = () => {
-+    cursor = 0;
-+    const element = context.exports.WorkbotTerminalAccess({
-+      session: { id: "fixture", path: "/runtime/pi/sessions/web/chat.jsonl" },
-+      running: false, onOpenFile() {}, children: React.createElement("textarea"),
-+    });
-+    return renderToStaticMarkup(element);
-+  };
-+  const html = render();
-+  started = true;
-+  cleanup = effect();
-+  return {
-+    html,
-+    // Drain mocked requests/state updates, rather than sleeping for readiness.
-+    async settle() { await new Promise(setImmediate); return render(); },
-+    focus() { window.dispatchEvent(new Event("focus")); },
-+    dispose() { cleanup(); },
-+  };
-+}
 +
 +test("read-only transcript polls only context pages, pauses when hidden and aborts on unmount", async () => {
-+  const requests = [];
-+  const effects = [];
-+  let poll;
-+  let cleared = false;
-+  const document = { visibilityState: "visible" };
-+  const dependencies = {
-+    react: {
-+      ...React,
-+      useEffect: (effect) => effects.push(effect),
-+      useLayoutEffect() {},
-+      useState: (initial) => [initial, () => {}],
-+      useRef: (current) => ({ current }),
-+      useMemo: (compute) => compute(),
-+      useCallback: (callback) => callback,
-+    },
-+    "./MessageView": { MessageView: () => null },
-+    "./workbot-transcript-state": await import("./workbot-transcript-state.ts"),
-+  };
-+  const context = createContext({
-+    exports: {}, require: (name) => dependencies[name], React, document, AbortController, URLSearchParams,
-+    fetch: async (url, options) => {
-+      requests.push({ url, options });
-+      return Response.json({ context: { messages: [], entryIds: [], hasMore: false } });
-+    },
-+    setInterval(callback, ms) { assert.equal(ms, 10_000); poll = callback; return 1; },
-+    clearInterval() { cleared = true; },
-+  });
-+  new Script(ts.transpileModule(
-+    readFileSync(new URL("./WorkbotTranscript.tsx", import.meta.url), "utf8"),
-+    { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React } },
-+  ).outputText).runInContext(context);
-+  context.exports.WorkbotTranscript({ sessionId: "im/fixture", running: true, onOpenFile() {} });
-+  const cleanups = effects.map((effect) => effect());
-+  try {
-+    await new Promise(setImmediate);
-+    assert.equal(requests.length, 1);
-+    document.visibilityState = "hidden";
-+    poll();
-+    assert.equal(requests.length, 1);
-+    document.visibilityState = "visible";
-+    poll();
-+    await new Promise(setImmediate);
-+    assert.equal(requests.length, 2);
-+    for (const { url, options } of requests) {
-+      assert.equal(url, "/api/sessions/im%2Ffixture/context?deferThinking=1&deferMedia=1&tail=100");
-+      assert.equal(options.method, undefined, "only GET, never send a prompt or start an agent");
-+    }
-+  } finally { for (const cleanup of cleanups) cleanup?.(); }
-+  assert.equal(cleared, true);
-+  assert.equal(requests[0].options.signal.aborted, true);
++  const requests = spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ context: { messages: [] } }));
++  const interval = spyOn(globalThis, "setInterval").mockReturnValue(1);
++  const clear = spyOn(globalThis, "clearInterval");
++  const container = await mount(React.createElement(WorkbotTranscript, { sessionId: "im/fixture", running: true, onOpenFile() {} }));
++
++  assert.ok(container.querySelector(".chat-content"));
++  assert.equal(requests.mock.calls.length, 1);
++  assert.equal(interval.mock.calls.length, 1);
++  const [poll, delay] = interval.mock.calls[0];
++  assert.equal(delay, 10_000);
++  Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
++  await act(async () => poll());
++  assert.equal(requests.mock.calls.length, 1);
++  Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
++  await act(async () => poll());
++  assert.equal(requests.mock.calls.length, 2);
++  for (const [url, options] of requests.mock.calls) {
++    assert.equal(url, "/api/sessions/im%2Ffixture/context?deferThinking=1&deferMedia=1&tail=100");
++    assert.equal(options.method, undefined, "only GET, never send a prompt or start an agent");
++  }
++  await act(async () => root.unmount());
++  root = undefined;
++  assert.ok(clear.mock.calls.some(([timer]) => timer === 1));
++  assert.equal(requests.mock.calls[0][1].signal.aborted, true);
 +});
 +
 +test("read-only paging preserves older records and ignores stale pages after a branch change", async () => {
@@ -366,60 +259,51 @@ index 0000000..821bb95
 +
 +const terminalUrl = `/tui/?arg=${"a".repeat(32)}`;
 +
-+test("idle GUI mounts only after both terminal detection and history refresh finish", async () => {
++test.each(["/runtime/pi/sessions/web/chat.jsonl", "/runtime/pi/sessions/im/chat.jsonl"])("%s mounts GUI only after ownership and history are ready", async (path) => {
 +  const terminal = Promise.withResolvers();
 +  const records = Promise.withResolvers();
-+  const requests = [];
-+  const guard = mountGuard((url) => {
-+    requests.push(url);
-+    return url.endsWith("/terminal") ? terminal.promise : records.promise;
-+  });
-+  try {
-+    assert.equal(guard.html, "");
-+    terminal.resolve(Response.json({ enabled: true, active: false, url: terminalUrl }));
-+    const refreshing = await guard.settle();
-+    assert.deepEqual(requests, ["/api/sessions/fixture/terminal", "/api/sessions/fixture?force=1"]);
-+    assert.equal(refreshing, "", "history refresh must also remain silent");
-+    records.resolve(new Response("{}"));
-+    const ready = await guard.settle();
-+    assert.match(ready, /textarea/);
-+    assert.doesNotMatch(ready, /data-read-only-transcript|正在检查会话状态/);
-+  } finally { guard.dispose(); }
++  const requests = spyOn(globalThis, "fetch").mockImplementation((url) =>
++    url.endsWith("/terminal") ? terminal.promise : records.promise,
++  );
++  const container = await mount(guard({ ...session, path }));
++  assert.equal(container.innerHTML, "");
++  await act(async () => terminal.resolve(Response.json({ enabled: true, active: false, url: terminalUrl })));
++  assert.deepEqual(requests.mock.calls.map(([url]) => url), ["/api/sessions/fixture/terminal", "/api/sessions/fixture?force=1"]);
++  assert.equal(container.innerHTML, "", "history refresh must also remain silent");
++  await act(async () => records.resolve(new Response("{}")));
++  assert.ok(container.querySelector("textarea"));
++  assert.equal(container.querySelector(".chat-content"), null);
++  // A harmless parent render must not restart the ownership effect or HTTP loop.
++  await act(async () => root.render(guard()));
++  assert.equal(requests.mock.calls.length, 2);
 +});
 +
 +test("confirmed TUI ownership mounts the transcript directly without starting GUI", async () => {
-+  const requests = [];
-+  const guard = mountGuard(async (url) => {
-+    requests.push(url);
-+    return Response.json({ enabled: true, active: true, url: terminalUrl });
-+  });
-+  try {
-+    assert.doesNotMatch(guard.html, /textarea|data-read-only-transcript/);
-+    const ready = await guard.settle();
-+    assert.match(ready, /此会话已在 TUI 中打开/);
-+    assert.match(ready, /data-read-only-transcript/);
-+    assert.doesNotMatch(ready, /textarea|正在检查会话状态/);
-+    assert.deepEqual(requests, ["/api/sessions/fixture/terminal"]);
-+  } finally { guard.dispose(); }
++  const requests = spyOn(globalThis, "fetch").mockImplementation(async (url) => Response.json(
++    url.endsWith("/terminal") ? { enabled: true, active: true, url: terminalUrl } : { context: { messages: [] } },
++  ));
++  const container = await mount(guard());
++  assert.match(container.textContent, /此会话已在 TUI 中打开/);
++  assert.ok(container.querySelector(".chat-content"));
++  assert.equal(container.querySelector("textarea"), null);
++  assert.deepEqual(requests.mock.calls.map(([url]) => url), [
++    "/api/sessions/fixture/terminal", "/api/sessions/fixture/context?deferThinking=1&deferMedia=1&tail=100",
++  ]);
 +});
 +
-+test("failed detection exposes retry without either viewer, then recovers on recheck", async () => {
-+  let attempts = 0;
-+  const guard = mountGuard(async () => {
-+    if (++attempts === 1) throw new Error("状态检查失败");
-+    return Response.json({ enabled: false, active: false });
-+  });
-+  try {
-+    const failed = await guard.settle();
-+    assert.match(failed, /状态检查失败/);
-+    assert.match(failed, /重试检查/);
-+    assert.doesNotMatch(failed, /textarea|data-read-only-transcript/);
-+    guard.focus();
-+    const recovered = await guard.settle();
-+    assert.equal(attempts, 2);
-+    assert.match(recovered, /textarea/);
-+    assert.doesNotMatch(recovered, /data-read-only-transcript|状态检查失败|重试检查/);
-+  } finally { guard.dispose(); }
++test("failed detection exposes retry without either viewer, then recovers on click", async () => {
++  const requests = spyOn(globalThis, "fetch")
++    .mockRejectedValueOnce(new Error("状态检查失败"))
++    .mockImplementation(async () => Response.json({ enabled: false, active: false }));
++  const container = await mount(guard());
++  assert.match(container.textContent, /状态检查失败/);
++  assert.equal(container.querySelector("textarea, .chat-content"), null);
++  const retry = container.querySelector("[role=alert] button");
++  assert.equal(retry.textContent, "重试检查");
++  await act(async () => retry.click());
++  assert.equal(requests.mock.calls.length, 2);
++  assert.ok(container.querySelector("textarea"));
++  assert.equal(container.querySelector("[role=alert], .chat-content"), null);
 +});
 diff --git a/components/WorkbotTerminalAccess.tsx b/components/WorkbotTerminalAccess.tsx
 new file mode 100644

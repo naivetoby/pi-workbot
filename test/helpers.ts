@@ -24,16 +24,33 @@ export function testEnvironment(overrides: Environment = {}): Environment {
 
 export async function waitFor(
   description: string,
-  check: () => boolean | Promise<boolean>,
+  check: (signal: AbortSignal) => boolean | Promise<boolean>,
   options: { timeout?: number; diagnostics?: () => string | Promise<string> } = {},
 ): Promise<void> {
-  const deadline = Date.now() + (options.timeout ?? 3_000)
-  while (!(await check())) {
-    if (Date.now() >= deadline) {
-      const details = await options.diagnostics?.()
-      throw new Error(`等待超时：${description}${details ? `\n${details}` : ''}`)
-    }
-    await Bun.sleep(20)
+  const controller = new AbortController()
+  const expired = Promise.withResolvers<never>()
+  const timer = setTimeout(() => {
+    controller.abort()
+    expired.reject(controller.signal.reason)
+  }, options.timeout ?? 3_000)
+  try {
+    // deadline 必须覆盖正在等待的异步检查；I/O 可使用 signal 一并取消。
+    await Promise.race([
+      expired.promise,
+      (async () => {
+        while (!controller.signal.aborted) {
+          if (await check(controller.signal)) return
+          await Bun.sleep(20)
+        }
+      })(),
+    ])
+  } catch (error) {
+    if (!controller.signal.aborted) throw error
+    const details = await options.diagnostics?.()
+    throw new Error(`等待超时：${description}${details ? `\n${details}` : ''}`)
+  } finally {
+    clearTimeout(timer)
+    controller.abort()
   }
 }
 

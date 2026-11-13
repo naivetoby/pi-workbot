@@ -41,6 +41,10 @@ process.env = {
 }
 const base = `http://127.0.0.1:${port}`
 const socket = join(root, 'tui.sock')
+const request = (url: string, options: RequestInit = {}) =>
+  fetch(url, { ...options, signal: AbortSignal.timeout(10_000) })
+const tmux = (...args: string[]) =>
+  run(['tmux', '-S', socket, ...args], { signal: AbortSignal.timeout(5_000) })
 // SAFETY: this script runs only in Bun, whose native WebSocket supports headers/protocols;
 // lib.dom's constructor declaration omits that overload.
 const BunWebSocket = WebSocket as unknown as {
@@ -99,7 +103,7 @@ try {
   await startWeb(config)
   await waitFor('代理及 Next 就绪', async () => {
     try {
-      return (await fetch(`${base}/api/web-auth`)).ok
+      return (await request(`${base}/api/web-auth`)).ok
     } catch {
       return false
     }
@@ -111,15 +115,15 @@ try {
     '/api/workbot-terminal/theme',
     `/api/sessions/${sessions[0]!.getSessionId()}/terminal`,
   ]) {
-    assert.equal((await fetch(base + path)).status, 401, `${path} 不得匿名访问`)
+    assert.equal((await request(base + path)).status, 401, `${path} 不得匿名访问`)
   }
-  const login = await fetch(`${base}/api/web-auth`, {
+  const login = await request(`${base}/api/web-auth`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Origin: base },
     body: JSON.stringify({ password: process.env.PI_WEB_PASSWORD }),
   })
   assert.equal(login.status, 200)
-  const secureLogin = await fetch(`${base}/api/web-auth`, {
+  const secureLogin = await request(`${base}/api/web-auth`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -139,16 +143,16 @@ try {
   const headers = { Cookie: cookie, Origin: base }
   await waitFor(
     'ttyd 页面就绪',
-    async () => (await fetch(`${base}/tui/`, { headers })).status === 200,
+    async () => (await request(`${base}/tui/`, { headers })).status === 200,
   )
   assert.equal(
-    (await fetch(`${base}/tui/`, { headers: { ...headers, Origin: 'https://attacker.invalid' } }))
+    (await request(`${base}/tui/`, { headers: { ...headers, Origin: 'https://attacker.invalid' } }))
       .status,
     403,
   )
   assert.equal(
     (
-      await fetch(`${base}/api/workbot-terminal/theme`, {
+      await request(`${base}/api/workbot-terminal/theme`, {
         method: 'POST',
         headers: {
           ...headers,
@@ -167,7 +171,7 @@ try {
     { ...headers, Origin: 'https://attacker.invalid' },
   ]
   for (const requestHeaders of rejectedHeaders) {
-    const response = await fetch(`${base}/tui/ws`, {
+    const response = await request(`${base}/tui/ws`, {
       headers: {
         ...requestHeaders,
         Connection: 'Upgrade',
@@ -182,7 +186,7 @@ try {
 
   const agentUrl = `${base}/api/agent/${sessions[0]!.getSessionId()}`
   const command = (type: string, extra: Record<string, string> = {}) =>
-    fetch(agentUrl, {
+    request(agentUrl, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({ type, ...extra }),
@@ -192,9 +196,9 @@ try {
     await waitFor(
       'GUI bash 开始运行',
       async () =>
-        (await fetch(agentUrl, { headers }).then((response) => response.json())).running === true,
+        (await request(agentUrl, { headers }).then((response) => response.json())).running === true,
     )
-    const rejected = await fetch(`${base}/api/sessions/${sessions[0]!.getSessionId()}/terminal`, {
+    const rejected = await request(`${base}/api/sessions/${sessions[0]!.getSessionId()}/terminal`, {
       method: 'POST',
       headers,
     })
@@ -207,7 +211,7 @@ try {
 
   const urls: string[] = []
   for (const session of sessions) {
-    const response = await fetch(`${base}/api/sessions/${session.getSessionId()}/terminal`, {
+    const response = await request(`${base}/api/sessions/${session.getSessionId()}/terminal`, {
       method: 'POST',
       headers,
     })
@@ -216,17 +220,16 @@ try {
     assert.equal(result.active, true)
     urls.push(result.url)
   }
-  const list = () =>
-    run(['tmux', '-S', socket, 'list-sessions', '-F', '#{session_name} #{pane_pid}'])
+  const list = () => tmux('list-sessions', '-F', '#{session_name} #{pane_pid}')
   let initial = await list()
   assert.equal(initial.trim().split('\n').length, 2)
-  const tmuxOptions = await run(['tmux', '-S', socket, 'show-options', '-s'])
+  const tmuxOptions = await tmux('show-options', '-s')
   assert.match(tmuxOptions, /^extended-keys on$/m, 'Pi 必须启用扩展键')
   // tmux < 3.5 has no format option; keep verifying its supported configuration.
   const supportsKeyFormat = /^extended-keys-format /m.test(tmuxOptions)
   if (supportsKeyFormat)
     assert.match(tmuxOptions, /^extended-keys-format csi-u$/m, 'Pi 扩展键必须使用 CSI-u')
-  await fetch(`${base}/api/sessions/${sessions[0]!.getSessionId()}/terminal`, {
+  await request(`${base}/api/sessions/${sessions[0]!.getSessionId()}/terminal`, {
     method: 'POST',
     headers,
   })
@@ -242,6 +245,7 @@ try {
         ],
         {
           env: { ...process.env, WORKBOT_TEST_COOKIE: cookie },
+          signal: AbortSignal.timeout(120_000),
         },
       ),
     )
@@ -322,7 +326,7 @@ try {
     'Ctrl+D 结束 Pi 及 tmux 会话',
     async () => (await list()).trim().split('\n').length === 1,
   )
-  const status = await fetch(`${base}/api/sessions/${sessions[0]!.getSessionId()}/terminal`, {
+  const status = await request(`${base}/api/sessions/${sessions[0]!.getSessionId()}/terminal`, {
     headers,
   }).then((response) => response.json())
   assert.equal(status.active, false)
@@ -332,8 +336,11 @@ try {
     env: { PATH: process.env.PATH, WORKBOT_TMUX_SOCKET: socket },
     stdout: 'pipe',
     stderr: 'pipe',
+    timeout: 5_000,
+    killSignal: 'SIGKILL',
   })
   assert.notEqual(await missing.exited, 0)
+  assert.equal(missing.signalCode, null, '失效链接应主动拒绝，不能靠超时终止')
   assert.equal((await list()).trim().split('\n').length, 1, '失效链接不得创建 shell 或会话')
   const remaining = await list()
   await stopWeb(config)
@@ -343,9 +350,12 @@ try {
   await startWeb(config)
   await waitFor('Web 重启后仍识别原 tmux 会话', async () => {
     try {
-      const response = await fetch(`${base}/api/sessions/${sessions[1]!.getSessionId()}/terminal`, {
-        headers,
-      })
+      const response = await request(
+        `${base}/api/sessions/${sessions[1]!.getSessionId()}/terminal`,
+        {
+          headers,
+        },
+      )
       return response.ok && (await response.json()).active === true
     } catch {
       return false
@@ -363,7 +373,7 @@ try {
   assert.equal(oldEnvironment.passwordPresent, false)
   retained.close()
 
-  const reopened = await fetch(`${base}/api/sessions/${sessions[0]!.getSessionId()}/terminal`, {
+  const reopened = await request(`${base}/api/sessions/${sessions[0]!.getSessionId()}/terminal`, {
     method: 'POST',
     headers,
   })
@@ -376,15 +386,7 @@ try {
   assert.equal(freshEnvironment.removed, undefined, '删除的环境变量不能从 tmux 恢复')
   assert.equal(freshEnvironment.passwordPresent, false, 'Pi 不得获得 Web 密码')
   assert((await list()).includes(String(freshEnvironment.pid)), 'Pi 替换启动器成为 pane 主进程')
-  const commands = await run([
-    'tmux',
-    '-S',
-    socket,
-    'list-panes',
-    '-a',
-    '-F',
-    '#{pane_start_command}',
-  ])
+  const commands = await tmux('list-panes', '-a', '-F', '#{pane_start_command}')
   for (const secret of [process.env.PI_WEB_PASSWORD!, process.env.WORKBOT_TEST_VALUE])
     assert(!commands.includes(secret), 'pane 启动参数不得包含凭证')
   assert.deepEqual(
@@ -401,11 +403,20 @@ try {
   throw error
 } finally {
   for (const ws of connections) ws.close()
-  await stopWeb(config)
-  const stop = Bun.spawn(['tmux', '-S', socket, 'kill-server'], {
-    stdout: 'ignore',
-    stderr: 'ignore',
-  })
-  await stop.exited
-  await rm(root, { recursive: true, force: true })
+  try {
+    await stopWeb(config)
+  } finally {
+    try {
+      const stop = Bun.spawn(['tmux', '-S', socket, 'kill-server'], {
+        stdout: 'ignore',
+        stderr: 'ignore',
+        timeout: 5_000,
+        killSignal: 'SIGKILL',
+      })
+      await stop.exited
+      assert.equal(stop.signalCode, null, 'tmux 清理超时')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }
 }
