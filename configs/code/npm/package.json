@@ -3,8 +3,8 @@
   "private": true,
   "dependencies": {
     "pi-web-access": "0.47.0",
-    "pi-subagents": "0.87.0",
+    "pi-subagents": "0.88.1",
     "@juicesharp/rpiv-todo": "2.15.0",
-    "pi-lens": "4.4.11"
+    "pi-lens": "4.4.12"
   }
 }

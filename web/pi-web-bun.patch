@@ -1,29 +1,3 @@
-diff --git a/package.json b/package.json
---- a/package.json
-+++ b/package.json
-@@ -48,14 +48,14 @@
-     "release": "npm version patch -m \"Release v%s\""
-   },
-   "dependencies": {
--    "@earendil-works/pi-agent-core": "1.5.0",
--    "@earendil-works/pi-ai": "1.5.0",
--    "@earendil-works/pi-codemode": "1.5.0",
--    "@earendil-works/pi-coding-agent": "1.5.0",
--    "@earendil-works/pi-mcp": "1.5.0",
--    "@earendil-works/pi-schema": "1.5.0",
--    "@earendil-works/pi-telemetry": "1.5.0",
--    "@earendil-works/pi-tui": "1.5.0",
-+    "@earendil-works/pi-agent-core": "1.5.2",
-+    "@earendil-works/pi-ai": "1.5.2",
-+    "@earendil-works/pi-codemode": "1.5.2",
-+    "@earendil-works/pi-coding-agent": "1.5.2",
-+    "@earendil-works/pi-mcp": "1.5.2",
-+    "@earendil-works/pi-schema": "1.5.2",
-+    "@earendil-works/pi-telemetry": "1.5.2",
-+    "@earendil-works/pi-tui": "1.5.2",
-     "@xterm/addon-fit": "0.11.0",
-     "@xterm/xterm": "6.0.0",
-     "js-yaml": "^5.2.3",
 diff --git a/app/api/sessions/[id]/terminal/route.ts b/app/api/sessions/[id]/terminal/route.ts
 new file mode 100644
 index 0000000..8bff70e
@@ -685,16 +659,16 @@ diff --git a/lib/rpc-manager.ts b/lib/rpc-manager.ts
 index 12a1ce5..d2f7761 100644
 --- a/lib/rpc-manager.ts
 +++ b/lib/rpc-manager.ts
-@@ -7,6 +7,7 @@ import { resolve } from "path";
- import { isDeepStrictEqual } from "util";
+@@ -8,6 +8,7 @@ import { isDeepStrictEqual } from "util";
  import { validateAgentImages } from "./image-attachments";
+ import { EXTENSION_REPORTED_CODE } from "./agent-client";
  import { cwdMissingError } from "./missing-cwd";
 +import { readWorkbotOrigin } from "./workbot-origin";
  import { invalidateModelsCache } from "./models-cache";
  import { invalidateModelRuntimeWithExtensions } from "./model-runtime";
- import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
-@@ -464,6 +465,11 @@ export class AgentSessionWrapper {
-     return this._alive && (this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
+ import { llamaCppExtension } from "./pi-sdk-internals";
+@@ -511,6 +512,11 @@ export class AgentSessionWrapper {
+     return this._alive && (this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.shellRunning);
    }
 
 +  canDetachForTerminal(): boolean {
