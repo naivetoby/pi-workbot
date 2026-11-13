@@ -9,6 +9,7 @@ services:
       pull: true
       args:
         BASE_IMAGE: '${WORKBOT_BASE_IMAGE:-naivetoby/pi-workbot-dev:latest}'
+        WORKBOT_BUILD_TESTS: '0'
     pull_policy: never
     init: true
     restart: unless-stopped

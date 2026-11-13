@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
 ARG BASE_IMAGE=naivetoby/pi-workbot-dev:latest
+# CI 默认运行测试，独立部署设为 0。
+ARG WORKBOT_BUILD_TESTS=1
 FROM ${BASE_IMAGE} AS base
 USER root
 WORKDIR /opt/workbot
@@ -21,6 +23,7 @@ COPY --chown=vscode:vscode configs/projects.json ./configs/projects.json
 COPY --chown=vscode:vscode configs/shared ./configs/shared
 COPY --chown=vscode:vscode bin ./bin
 RUN chmod +x bin/*
+ARG WORKBOT_BUILD_TESTS
 
 # Web 只依赖固定源码、补丁和构建脚本，业务代码与角色配置变更不应触发重编译。
 FROM ${BASE_IMAGE} AS web-build
@@ -31,7 +34,9 @@ COPY scripts/prepare-web.ts ./scripts/prepare-web.ts
 COPY src/runtime/paths.ts src/runtime/process.ts src/runtime/types.ts ./src/runtime/
 COPY web ./web
 ENV BUN_INSTALL_CACHE_DIR=/var/cache/bun
-RUN --mount=type=cache,id=pi-workbot-web-bun,target=/var/cache/bun bun run build:web
+ARG WORKBOT_BUILD_TESTS
+RUN --mount=type=cache,id=pi-workbot-web-bun,target=/var/cache/bun \
+    if [ "$WORKBOT_BUILD_TESTS" = "0" ]; then bun run build:web --skip-tests; else bun run build:web; fi
 
 # ttyd 保留固定后端；浏览器页复用 web-build 中同一套 Pi Web 源码和依赖。
 FROM web-build AS terminal-build
@@ -53,16 +58,18 @@ FROM base AS code
 # code 只使用已有工具；chat 保留 lens 的按需安装行为。
 ENV WORKBOT_ROLE=code PI_LENS_DISABLE_LSP_INSTALL=1 PI_LENS_DISABLE_TOOL_INSTALL=1
 COPY --chown=vscode:vscode configs/code ./configs/code
-RUN bun scripts/prepare-pi.ts configs/code && bun scripts/smoke-assets.ts code
-RUN --network=none bun scripts/smoke-lens.ts code
+RUN bun scripts/prepare-pi.ts configs/code
+RUN if [ "$WORKBOT_BUILD_TESTS" != "0" ]; then bun scripts/smoke-assets.ts code; fi
+RUN --network=none if [ "$WORKBOT_BUILD_TESTS" != "0" ]; then bun scripts/smoke-lens.ts code; fi
 CMD ["bun", "src/cli.ts", "code"]
 
 # 插件兼容性使用角色自己的锁文件验证，不要求先构建 Web/TUI。
 FROM base AS chat-assets
 ENV WORKBOT_ROLE=chat
 COPY --chown=vscode:vscode configs/chat ./configs/chat
-RUN bun scripts/prepare-pi.ts configs/chat && bun scripts/smoke-assets.ts chat
-RUN --network=none bun scripts/smoke-lens.ts chat
+RUN bun scripts/prepare-pi.ts configs/chat
+RUN if [ "$WORKBOT_BUILD_TESTS" != "0" ]; then bun scripts/smoke-assets.ts chat; fi
+RUN --network=none if [ "$WORKBOT_BUILD_TESTS" != "0" ]; then bun scripts/smoke-lens.ts chat; fi
 
 # 独立验证终端运行依赖与会话生命周期。
 FROM base AS tui-check
@@ -77,7 +84,7 @@ COPY --chown=vscode:vscode configs/tmux.conf ./configs/tmux.conf
 USER vscode
 COPY --from=web-build --chown=vscode:vscode /opt/workbot/.cache/pi-web /opt/workbot/.cache/pi-web
 COPY --chown=vscode:vscode test/fixtures/tui-session-probe.ts ./test/fixtures/tui-session-probe.ts
-RUN bun scripts/smoke-tui.ts
+RUN if [ "$WORKBOT_BUILD_TESTS" != "0" ]; then bun scripts/smoke-tui.ts; fi
 
 FROM tui-check AS chat
 COPY --from=chat-assets --chown=vscode:vscode /opt/workbot/configs/chat ./configs/chat

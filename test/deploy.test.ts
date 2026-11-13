@@ -15,7 +15,7 @@ interface StandaloneCompose {
         dockerfile: string
         target: string
         pull: boolean
-        args: { BASE_IMAGE: string }
+        args: { BASE_IMAGE: string; WORKBOT_BUILD_TESTS: string }
       }
       pull_policy: string
       environment: string[]
@@ -64,7 +64,7 @@ describe('服务器独立部署', () => {
     expect(await Bun.file(join(config.piDir, 'AGENTS.md')).text()).toBe(instructions)
   })
 
-  it('Compose 直接构建和运行 chat，每次构建拉取底座', async () => {
+  it('Compose 直接构建和运行 chat，每次构建拉取底座并跳过测试', async () => {
     const config = await compose()
     const { chat } = config.services
 
@@ -76,7 +76,10 @@ describe('服务器独立部署', () => {
       dockerfile: 'Dockerfile',
       target: 'chat',
       pull: true,
-      args: { BASE_IMAGE: '${WORKBOT_BASE_IMAGE:-naivetoby/pi-workbot-dev:latest}' },
+      args: {
+        BASE_IMAGE: '${WORKBOT_BASE_IMAGE:-naivetoby/pi-workbot-dev:latest}',
+        WORKBOT_BUILD_TESTS: '0',
+      },
     })
   })
 

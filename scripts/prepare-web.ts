@@ -18,7 +18,7 @@ async function step<T>(label: string, action: () => Promise<T>): Promise<T> {
   }
 }
 
-export async function prepareWeb(build = false, test = false): Promise<void> {
+export async function prepareWeb(build = false, test = build): Promise<void> {
   const patch = join(ROOT, 'web/pi-web-bun.patch')
   const lock = join(ROOT, 'web/bun.lock')
   const archive = join(ROOT, 'web', `pi-web-${WEB_COMMIT}.tar.gz`)
@@ -60,7 +60,7 @@ export async function prepareWeb(build = false, test = false): Promise<void> {
       { cwd: WEB_DIR, inherit: true },
     ),
   )
-  if (test || build) {
+  if (test) {
     await step('Workbot Web 补丁测试', () =>
       run(
         [
@@ -103,5 +103,9 @@ export async function prepareWeb(build = false, test = false): Promise<void> {
   console.log(`pi-web ${WEB_COMMIT} 已准备，Bun 补丁已应用`)
 }
 
-if (import.meta.main)
-  await prepareWeb(process.argv.includes('--build'), process.argv.includes('--test'))
+if (import.meta.main) {
+  const build = process.argv.includes('--build')
+  // 显式 --test 始终执行测试；--skip-tests 只关闭构建隐含的补丁验收。
+  const test = process.argv.includes('--test') || (build && !process.argv.includes('--skip-tests'))
+  await prepareWeb(build, test)
+}

@@ -1,7 +1,7 @@
 // @env node
 import { describe, expect, it } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { cp, mkdir, rm } from 'node:fs/promises'
+import { cp, mkdir, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { ROOT, WEB_COMMIT } from '../src/runtime/paths.ts'
 import { run } from '../src/runtime/process.ts'
@@ -11,6 +11,8 @@ interface FixtureOptions {
   failBuild?: boolean
   failTest?: boolean
   archiveState?: 'corrupt' | 'missing'
+  skipTests?: boolean
+  repeat?: boolean
 }
 
 async function sha256(path: string): Promise<string> {
@@ -128,6 +130,7 @@ async function buildFixture(options: FixtureOptions = {}) {
           join(root, 'deny-fetch.ts'),
           join(root, 'scripts/prepare-web.ts'),
           '--build',
+          ...(options.skipTests ? ['--skip-tests'] : []),
         ],
         {
           cwd: root,
@@ -144,7 +147,7 @@ async function buildFixture(options: FixtureOptions = {}) {
       return { stdout, stderr, code }
     }
     const result = await execute()
-    const repeated = result.code === 0 ? await execute() : undefined
+    const repeated = options.repeat && result.code === 0 ? await execute() : undefined
     return { source, sourceArchive, requests, ...result, repeated }
   } finally {
     server.stop(true)
@@ -194,13 +197,10 @@ describe('Web 构建准备', () => {
   }, 15_000)
 
   it('无需下载源码即可解压、应用补丁，并使用根镜像配置安装编译', async () => {
-    const result = await buildFixture()
+    const result = await buildFixture({ repeat: true })
+
     expect(result.code, result.stderr).toBe(0)
-    expect(result.stdout).toContain('校验本地源码包 SHA-256完成 (')
-    expect(result.stdout).toContain('解压本地源码完成 (')
     expect(result.requests).toContain('/next/-/next-0.0.0-workbot-fixture.tgz')
-    expect(result.stdout).toContain('安装 Web 依赖（使用项目 bunfig.toml 镜像配置）完成 (')
-    expect(result.stdout).toContain('Next.js 生产编译完成 (')
     expect(await Bun.file(join(result.source, '.next/BUILD_ID')).json()).toEqual({
       args: ['build', '--webpack'],
       offline: '1',
@@ -213,31 +213,43 @@ describe('Web 构建准备', () => {
     expect(result.repeated?.stdout).not.toContain('解压本地源码')
   }, 15_000)
 
+  it('跳过补丁测试时完成依赖安装、补丁应用和编译', async () => {
+    const result = await buildFixture({ skipTests: true, failTest: true })
+
+    expect(result.code, result.stderr).toBe(0)
+    expect(result.requests).toContain('/next/-/next-0.0.0-workbot-fixture.tgz')
+    expect(await Bun.file(join(result.source, '.next/BUILD_ID')).exists()).toBe(true)
+    expect(await Bun.file(join(result.source, 'fixture.txt')).text()).toBe('after\n')
+  }, 15_000)
+
   for (const archiveState of ['corrupt', 'missing'] as const) {
-    it(`源码包 ${archiveState} 时明确报错并保留现有源码`, async () => {
-      const result = await buildFixture({ archiveState })
+    it(`跳过测试时仍拒绝 ${archiveState} 源码包，并保留现有源码`, async () => {
+      const result = await buildFixture({ archiveState, skipTests: true })
+
       expect(result.code).not.toBe(0)
       expect(result.stderr).toContain(
         archiveState === 'corrupt' ? 'SHA-256 校验失败' : '缺少本地 pi-web 源码包',
       )
       expect(result.requests).toHaveLength(0)
-      expect(result.stdout).not.toContain('安装 Web 依赖')
+      expect(await readdir(result.source)).not.toContain('node_modules')
       expect(await Bun.file(join(result.source, 'preserved')).text()).toBe('keep')
     }, 15_000)
   }
 
-  it('补丁测试失败时阻止生产编译，而不只是检查测试文件存在', async () => {
+  it('默认构建在补丁测试失败时停止编译', async () => {
     const result = await buildFixture({ failTest: true })
+
     expect(result.code).not.toBe(0)
     expect(result.stderr).toContain('Workbot Web 补丁测试失败')
-    expect(result.stdout).not.toContain('Next.js 生产编译')
     expect(await Bun.file(join(result.source, '.next/BUILD_ID')).exists()).toBe(false)
   }, 15_000)
 
-  it('编译失败时报告失败阶段，不打印成功提示', async () => {
-    const result = await buildFixture({ failBuild: true })
+  it('跳过测试时仍报告编译失败', async () => {
+    const result = await buildFixture({ failBuild: true, skipTests: true })
+
     expect(result.code).not.toBe(0)
-    expect(result.stderr).toContain('Next.js 生产编译失败 (')
+    expect(result.stderr).toContain('Next.js 生产编译失败')
+    expect(await Bun.file(join(result.source, '.next/BUILD_ID')).exists()).toBe(false)
     expect(result.stdout).not.toContain('已准备，Bun 补丁已应用')
   }, 15_000)
 })

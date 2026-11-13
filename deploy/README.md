@@ -104,13 +104,6 @@ docker compose down
 
 ## 镜像构建与维护
 
-两种部署共用根目录 `Dockerfile`，默认使用 `naivetoby/pi-workbot-dev:latest` 研发底座，可通过 `.env` 的 `WORKBOT_BASE_IMAGE` 替换，包含语言工具链、Bun、glab、语言服务器和检查器。应用阶段按职责分层：
+共用根目录 `Dockerfile`，独立部署不运行测试，CI 保留测试。
 
-- `base`：按锁文件安装 Workbot 依赖，复制源码和共享资产。
-- `web-build` → `terminal-build`：构建 Web 与终端，复用前端源码和依赖。
-- `base` → `chat-assets`：安装角色插件，验证资产和 Pi/lens。
-- `base` → `tui-check` → `chat`：验证 Web/终端产物，组合已验收的角色资源。
-
-Web/TUI 源码和构建依赖未变时可复用缓存，业务源码和角色配置变更无需重编译前端。依赖以 `vscode` 用户安装，复制文件时设置归属，避免递归修改权限产生额外镜像层。根目录 `.dockerignore` 排除整个 `deploy/`、本地 Compose override 和嵌套 `.env` 文件，本地凭证及挂载配置不会发送给构建器。
-
-只维护一份 Dockerfile，GitLab 构建和独立部署使用相同应用阶段与验收要求。替换底座需保留 `vscode` 用户及运行工具，并通过 Linux 镜像检查。`build --pull` 会拉取最新研发底座。角色插件依赖由锁文件固定，Web 源码版本由仓库记录固定。
+默认基础镜像为 `naivetoby/pi-workbot-dev:latest`，可通过 `.env` 的 `WORKBOT_BASE_IMAGE` 替换。`build --pull` 会拉取最新底座，未变化的构建步骤复用缓存。

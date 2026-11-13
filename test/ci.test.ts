@@ -114,13 +114,20 @@ if [ "$2" = up ] && [ "$WORKBOT_TEST_FAIL" = 1 ]; then exit 9; fi
     expect(dockerfile).toContain('FROM tui-check AS chat')
   })
 
-  it('角色沿用上游用户，禁网验证各自的 Pi/lens，chat 成品依赖已验收的资产', async () => {
-    const dockerfile = await Bun.file(join(ROOT, 'Dockerfile')).text()
+  it('角色构建沿用上游用户，默认开启测试并配置 Pi/lens 禁网验收', async () => {
+    const dockerfile = (await Bun.file(join(ROOT, 'Dockerfile')).text()).replace(/\\\n\s*/g, ' ')
     expect(dockerfile).toContain('USER vscode')
     expect(dockerfile).toContain('ENV HOME=/home/vscode')
     expect(dockerfile).not.toContain('bun:bun')
+    expect(dockerfile).toMatch(/^ARG\s+WORKBOT_BUILD_TESTS=1\s*$/m)
+    for (const stage of ['base', 'web-build']) {
+      const source = dockerfile.split(` AS ${stage}\n`)[1]?.split('\nFROM ')[0]
+      expect(source).toMatch(/^ARG\s+WORKBOT_BUILD_TESTS\s*$/m)
+    }
+    const offlineRuns = dockerfile.match(/^RUN\s+--network=none\b.*$/gm)?.join('\n') ?? ''
     for (const role of ['code', 'chat']) {
-      expect(dockerfile).toContain(`RUN --network=none bun scripts/smoke-lens.ts ${role}`)
+      expect(dockerfile).toContain(`bun scripts/prepare-pi.ts configs/${role}`)
+      expect(offlineRuns).toContain(`bun scripts/smoke-lens.ts ${role}`)
     }
     expect(dockerfile).toContain(
       'COPY --from=chat-assets --chown=vscode:vscode /opt/workbot/configs/chat',
@@ -191,7 +198,7 @@ if [ "$2" = up ] && [ "$WORKBOT_TEST_FAIL" = 1 ]; then exit 9; fi
     const terminalStage = dockerfile
       .split('FROM base AS tui-check')[1]
       ?.split('FROM tui-check AS chat')[0]
-    expect(terminalStage).toContain('RUN bun scripts/smoke-tui.ts')
+    expect(terminalStage).toMatch(/\bbun\s+scripts\/smoke-tui\.ts\b/)
     expect(terminalStage).toContain('test/fixtures/tui-session-probe.ts')
     expect(terminalStage).not.toContain('prepare-pi.ts configs/chat')
     expect(dockerfile).toContain('FROM tui-check AS chat')
