@@ -1,8 +1,8 @@
 {
   "repository": "https://github.com/antfu/skills",
   "ref": "main",
-  "commit": "f63e9ec7bc85f67364b6596c2d29da87e83ce445",
-  "commitDate": "2026-11-05T04:52:15Z",
+  "commit": "d524ed287eef22757297827ce42e3cad88abd20c",
+  "commitDate": "2026-11-11T08:13:27Z",
   "license": "licenses/antfu-skills.LICENSE.md",
   "skills": [
     "antfu",
