@@ -174,7 +174,7 @@ describe('Web 构建准备', () => {
     const patch = join(ROOT, 'web/pi-web-bun.patch')
     await run(['git', 'apply', '--directory=.cache/pi-web', '--check', patch], { cwd: root })
     await run(['git', 'apply', '--directory=.cache/pi-web', patch], { cwd: root })
-    expect((await Bun.file(join(source, 'package.json')).json()).version).toBe('0.16.0')
+    expect((await Bun.file(join(source, 'package.json')).json()).version).toBe('0.17.0')
     const webDependencies = (await Bun.file(join(source, 'package.json')).json()).dependencies
     const rootManifest = await Bun.file(join(ROOT, 'package.json')).json()
     for (const [name, version] of Object.entries(webDependencies)) {
