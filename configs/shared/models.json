@@ -8,7 +8,7 @@
       "apiKey": "${OPENAI_RELAY_API_KEY}",
       "models": [
         {
-          "id": "gpt-6.1-sol",
+          "id": "gpt-6.2-sol",
           "reasoning": true,
           "thinkingLevelMap": {
             "off": null,
@@ -19,7 +19,7 @@
           "input": ["text", "image"]
         },
         {
-          "id": "gpt-6-astra",
+          "id": "gpt-6.2-astra",
           "reasoning": true,
           "thinkingLevelMap": {
             "off": null,
