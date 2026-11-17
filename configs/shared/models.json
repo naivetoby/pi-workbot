@@ -9,6 +9,8 @@
       "models": [
         {
           "id": "gpt-6.2-sol",
+          "contextWindow": 500000,
+          "maxTokens": 128000,
           "reasoning": true,
           "thinkingLevelMap": {
             "off": null,
@@ -20,6 +22,8 @@
         },
         {
           "id": "gpt-6.2-astra",
+          "contextWindow": 272000,
+          "maxTokens": 128000,
           "reasoning": true,
           "thinkingLevelMap": {
             "off": null,
