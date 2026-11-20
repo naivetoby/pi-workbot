@@ -4,12 +4,12 @@
   "defaultThinkingLevel": "high",
   "hideThinkingBlock": false,
   "packages": [
-    "npm:pi-web-access@0.47.0",
-    "npm:pi-subagents@0.88.1",
+    "npm:pi-web-access@0.48.0",
+    "npm:pi-subagents@0.89.1",
     "npm:@juicesharp/rpiv-todo@2.15.0",
-    "npm:pi-lens@4.4.12",
-    "npm:@lhlyu/pi-kit@0.2.1",
-    "npm:pi-cc-extensions@1.0.18",
+    "npm:pi-lens@4.5.0",
+    "npm:@lhlyu/pi-kit@0.2.3",
+    "npm:pi-cc-extensions@1.0.21",
     "npm:@narumitw/pi-usage@0.69.3"
   ],
   "npmCommand": ["bun"],

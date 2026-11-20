@@ -2,12 +2,12 @@
   "name": "pi-extensions",
   "private": true,
   "dependencies": {
-    "pi-web-access": "0.47.0",
-    "pi-subagents": "0.88.1",
+    "pi-web-access": "0.48.0",
+    "pi-subagents": "0.89.1",
     "@juicesharp/rpiv-todo": "2.15.0",
-    "pi-lens": "4.4.12",
-    "@lhlyu/pi-kit": "0.2.1",
-    "pi-cc-extensions": "1.0.18",
+    "pi-lens": "4.5.0",
+    "@lhlyu/pi-kit": "0.2.3",
+    "pi-cc-extensions": "1.0.21",
     "@narumitw/pi-usage": "0.69.3"
   }
 }

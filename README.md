@@ -181,7 +181,7 @@ docker compose exec chat bun src/cli.ts web start
 
 ## 开发与验证
 
-需要 Bun `>=1.4.2`，项目与 Web 使用 Pi `1.5.2`。Workbot 自身开发和 CI 执行检查与 smoke：
+需要 Bun `>=1.4.2`，项目与 Web 使用 Pi `1.6.0`。Workbot 自身开发和 CI 执行检查与 smoke：
 
 ```sh
 bun install --frozen-lockfile --ignore-scripts

@@ -1,10 +1,11 @@
 diff --git a/package.json b/package.json
+index e0e315b..36b4b73 100644
 --- a/package.json
 +++ b/package.json
-@@ -82,6 +82,7 @@
+@@ -83,6 +83,7 @@
      "ansi_up": "^6.0.6",
      "eslint": "^9",
-     "eslint-config-next": "16.4.4",
+     "eslint-config-next": "16.4.6",
 +    "happy-dom": "21.0.4",
      "jiti": "^2.7.0",
      "katex": "^0.16.47",
@@ -105,7 +106,7 @@ index 5379356..4b19b8d 100644
 @@ -8,8 +8,10 @@ import "./settings.css";
  import "./sidebar.css";
  import "./sidebar-menu.css";
-
+ 
 -const notoSansMono = Noto_Sans_Mono({
 -  subsets: ["latin", "cyrillic"],
 +const notoSansMono = localFont({
@@ -116,7 +117,7 @@ index 5379356..4b19b8d 100644
    display: "swap",
  });
 diff --git a/components/AppShell.tsx b/components/AppShell.tsx
-index 730f8d2..ea948f7 100644
+index 2cbebe1..06d8fb5 100644
 --- a/components/AppShell.tsx
 +++ b/components/AppShell.tsx
 @@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
@@ -127,7 +128,7 @@ index 730f8d2..ea948f7 100644
  import { NewSessionContextBar, type NewSessionContextControl } from "./NewSessionContextBar";
  import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
  import { FileViewer } from "./FileViewer";
-@@ -2749,8 +2750,10 @@ export function AppShell() {
+@@ -2895,8 +2896,10 @@ export function AppShell() {
          {/* Chat content */}
          <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
            {showChat ? (
@@ -139,7 +140,7 @@ index 730f8d2..ea948f7 100644
                session={selectedSession}
                searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
                onSearchTargetHandled={handleSearchTargetHandled}
-@@ -2789,6 +2792,7 @@ export function AppShell() {
+@@ -2936,6 +2939,7 @@ export function AppShell() {
                unlockAudio={unlockAudio}
                holdAudio={holdAudio}
              />
@@ -149,7 +150,7 @@ index 730f8d2..ea948f7 100644
                role="status"
 diff --git a/components/WorkbotTerminalAccess.test.mjs b/components/WorkbotTerminalAccess.test.mjs
 new file mode 100644
-index 0000000..821bb95
+index 0000000..fb89166
 --- /dev/null
 +++ b/components/WorkbotTerminalAccess.test.mjs
 @@ -0,0 +1,152 @@
@@ -436,7 +437,7 @@ index e4abacb..e4dd54e 100644
 +++ b/lib/default-cwd.ts
 @@ -15,5 +15,5 @@ export function localDateStamp(now = new Date()): string {
  }
-
+ 
  export function defaultCwdPath(now = new Date(), home = homedir()): string {
 -  return path.join(home, DEFAULT_CWD_PARENT, localDateStamp(now));
 +  return process.env.PI_WEB_DEFAULT_CWD || path.join(home, DEFAULT_CWD_PARENT, localDateStamp(now));
@@ -468,10 +469,10 @@ index 0301dba..c1ae301 100644
    return script
      ? { command: execPath, args: [script, ...args] }
 diff --git a/lib/pi-sdk-internals.ts b/lib/pi-sdk-internals.ts
-index a36a488..c92e6bc 100644
+index ac8d636..7d9ebfc 100644
 --- a/lib/pi-sdk-internals.ts
 +++ b/lib/pi-sdk-internals.ts
-@@ -8,9 +8,8 @@ import {
+@@ -10,9 +10,8 @@ import {
    type McpServerEntry,
    type McpTransportFactory,
  } from "@earendil-works/pi-coding-agent";
@@ -481,12 +482,12 @@ index a36a488..c92e6bc 100644
 +import { readFileSync, realpathSync, statSync } from "node:fs";
 +import { dirname, join } from "node:path";
  import { pathToFileURL } from "node:url";
-
+ 
  // MCP support the SDK ships but its package does not export (ADR 0006): the
-@@ -288,14 +287,44 @@ function packageImportEntry(manifest: unknown): string | undefined {
+@@ -290,14 +289,44 @@ function packageImportEntry(manifest: unknown): string | undefined {
    return conditionalTarget(isRecord(exports) && "." in exports ? exports["."] : exports) ?? undefined;
  }
-
+ 
 +/**
 + * The package.json of a dependency, as Node's resolver finds it: the
 + * `node_modules` of the importer's folder, then of every folder above it.
@@ -530,7 +531,7 @@ index a36a488..c92e6bc 100644
    if (!manifestPath) throw new Error(`cannot resolve ${MCP_PACKAGE}`);
    const entry = packageImportEntry(JSON.parse(readFileSync(manifestPath, "utf8")));
    if (!entry) throw new Error(`${manifestPath} declares no import entry`);
-@@ -305,7 +334,7 @@ function resolveMcpClientEntry(packageDir: string): string {
+@@ -307,7 +336,7 @@ function resolveMcpClientEntry(packageDir: string): string {
  function resolvedSdkPackageDir(cwd: string): string {
    // Next.js runs the server with the project as cwd, and resolves externals
    // from its build output inside the project, so both find the same package.
@@ -540,7 +541,7 @@ index a36a488..c92e6bc 100644
    return realpathSync(join(manifestPath, ".."));
  }
 diff --git a/lib/rpc-manager.ts b/lib/rpc-manager.ts
-index 12a1ce5..d2f7761 100644
+index 66c1ad6..fea5a01 100644
 --- a/lib/rpc-manager.ts
 +++ b/lib/rpc-manager.ts
 @@ -8,6 +8,7 @@ import { isDeepStrictEqual } from "util";
@@ -551,10 +552,10 @@ index 12a1ce5..d2f7761 100644
  import { invalidateModelsCache } from "./models-cache";
  import { invalidateModelRuntimeWithExtensions } from "./model-runtime";
  import { llamaCppExtension } from "./pi-sdk-internals";
-@@ -511,6 +512,11 @@ export class AgentSessionWrapper {
+@@ -542,6 +543,11 @@ export class AgentSessionWrapper {
      return this._alive && (this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.shellRunning);
    }
-
+ 
 +  canDetachForTerminal(): boolean {
 +    return this.isAlive() && !this.isRunning() && this.activeMutatingCommands === 0
 +      && (!this.extensionBindingPromise || this.extensionsBound);
@@ -563,8 +564,8 @@ index 12a1ce5..d2f7761 100644
    /**
     * True while an extension's blocking dialog is unanswered: select, confirm,
     * input, editor, or a custom overlay still open. The run is parked on a promise
-@@ -2866,6 +2872,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
-
+@@ -3315,6 +3321,7 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
+ 
      sessions.push({
        path: sessionFile ?? "",
 +      origin: readWorkbotOrigin(entries, header?.id ?? session.sessionId),
@@ -737,7 +738,7 @@ index 0000000..89616bf
 +  };
 +}
 diff --git a/lib/terminal-manager.ts b/lib/terminal-manager.ts
-index d4ea56f..50b80f2 100644
+index 752b35d..65eee2c 100644
 --- a/lib/terminal-manager.ts
 +++ b/lib/terminal-manager.ts
 @@ -1,9 +1,11 @@
@@ -750,12 +751,12 @@ index d4ea56f..50b80f2 100644
  import type { DebugServerGlobal } from "./debug-types";
 +import type { TerminalTheme } from "./terminal-theme";
 +import { createTerminalThemeTracker, terminalThemeReport } from "./workbot-terminal-theme";
-
+ 
  export type TerminalEvent =
    | { type: "output"; data: string; offset: number; reset?: boolean }
 @@ -13,10 +15,11 @@ export type TerminalEvent =
  type TerminalListener = (event: TerminalEvent) => void;
-
+ 
  interface TerminalRecord {
 -  pty: IPty;
 +  pty: PtyProcess;
@@ -793,7 +794,7 @@ index d4ea56f..50b80f2 100644
      exitCode: null,
 @@ -137,6 +143,7 @@ export function createTerminal(cwd: string, cols: number, rows: number, id: stri
    scheduleCleanup(id, record);
-
+ 
    pty.onData((data) => {
 +    record.themeTracker.write(data);
      record.backlog = (record.backlog + data).slice(-MAX_BACKLOG);
@@ -802,7 +803,7 @@ index d4ea56f..50b80f2 100644
 @@ -221,6 +228,16 @@ export function writeTerminal(id: string, data: string): boolean {
    return true;
  }
-
+ 
 +export function syncTerminalTheme(id: string, theme: TerminalTheme): boolean {
 +  const record = registry().get(id);
 +  if (!record || record.exited) return false;
@@ -818,7 +819,7 @@ index d4ea56f..50b80f2 100644
    if (!record || record.exited) return false;
 diff --git a/lib/workbot-terminal.ts b/lib/workbot-terminal.ts
 new file mode 100644
-index 0000000..6db72f3
+index 0000000..7c4527c
 --- /dev/null
 +++ b/lib/workbot-terminal.ts
 @@ -0,0 +1,106 @@
@@ -1320,7 +1321,7 @@ index d9eba3f..f633d86 100644
        "dom",
        "dom.iterable",
 diff --git a/app/api/sessions/[id]/route.ts b/app/api/sessions/[id]/route.ts
-index e2ed818..1173ce4 100644
+index e9affa9..d560e1a 100644
 --- a/app/api/sessions/[id]/route.ts
 +++ b/app/api/sessions/[id]/route.ts
 @@ -19,6 +19,7 @@ import type { SessionEntry } from "@/lib/types";
@@ -1328,10 +1329,10 @@ index e2ed818..1173ce4 100644
  import { readSideRelation, sideOwnEntries } from "@/lib/side-session";
  import { readSessionToolSelection } from "@/lib/session-tool-selection";
 +import { readWorkbotOrigin } from "@/lib/workbot-origin";
- import { jsonResponse } from "@/lib/json-response";
  import { deleteSessions } from "@/lib/session-delete";
  import { attachTranscriptNotices, readSessionTranscriptNotices } from "@/lib/transcript-notices-server";
-@@ -117,6 +118,7 @@ export async function GET(
+ 
+@@ -116,6 +117,7 @@ export async function GET(
        ?? readSessionToolSelection(entries as never);
      const info = header ? (await attachSessionProjectInfo([{
        path: filePath,
@@ -1340,22 +1341,22 @@ index e2ed818..1173ce4 100644
        cwd: header.cwd ?? "",
        name: sessionName,
 diff --git a/lib/session-reader.ts b/lib/session-reader.ts
-index 56819fa..a1005ad 100644
+index 69b0ca2..4e7fba0 100644
 --- a/lib/session-reader.ts
 +++ b/lib/session-reader.ts
 @@ -18,6 +18,8 @@ import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
  import { readSideRelation } from "./side-session";
  import { checkSessionMembership, listSessionsIncremental, scanSessionFileInfo, type ScannedSessionInfo } from "./session-list-scanner";
-
+ 
 +import { readWorkbotOrigin, type WorkbotOrigin } from "./workbot-origin";
 +
  export { getAgentDir };
-
+ 
  const SESSION_HEADER_MAX_BYTES = 64 * 1024;
 @@ -198,6 +200,17 @@ type ScannedSide = NonNullable<ReturnType<typeof readSideRelation>>;
   */
  const scannedSubagentRuns = new WeakMap<ScannedSessionInfo, { subagent: ScannedSubagent | null; side: ScannedSide | null }>();
-
+ 
 +const scannedOrigins = new WeakMap<ScannedSessionInfo, WorkbotOrigin | null>();
 +
 +function resolveScannedOrigin(scanned: ScannedSessionInfo): WorkbotOrigin | undefined {
@@ -1394,7 +1395,7 @@ index 56819fa..a1005ad 100644
 +  });
 +  return attachSessionProjectInfo(sessions);
  }
-
+ 
  /**
 diff --git a/lib/types.ts b/lib/types.ts
 index 6ffd388..a815071 100644
@@ -1404,11 +1405,11 @@ index 6ffd388..a815071 100644
 +import type { WorkbotOrigin } from "./workbot-origin";
 +
  // Types mirrored from pi-mono coding-agent session-manager
-
+ 
  export interface SessionHeader {
 @@ -355,6 +357,7 @@ export interface SessionTreeNode {
  }
-
+ 
  export interface SessionInfo {
 +  origin?: WorkbotOrigin;
    path: string;
@@ -1774,7 +1775,7 @@ index 0000000..79c5200
 +  return { kind: "im", adapter: data.adapter };
 +}
 diff --git a/components/TerminalPanel.tsx b/components/TerminalPanel.tsx
-index ea6126e..9401cd3 100644
+index 1541d6e..141183e 100644
 --- a/components/TerminalPanel.tsx
 +++ b/components/TerminalPanel.tsx
 @@ -20,6 +20,8 @@ import {
@@ -1785,8 +1786,21 @@ index ea6126e..9401cd3 100644
 +import { attachTerminalInput, focusTerminalOnDesktop } from "@/lib/workbot-terminal-input";
  import { TerminalExtraKeys, useTerminalExtraKeysVisible } from "./TerminalExtraKeys";
  import type { TerminalTab } from "./terminal-tab-state";
-
-@@ -38,6 +40,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+ 
+@@ -31,12 +33,6 @@ interface Props {
+   onCloseError: () => void;
+ }
+ 
+-function shouldAutofocusTerminal() {
+-  // On touch devices, let a real tap focus xterm and open the software keyboard.
+-  // Programmatic focus can leave iOS focused without showing its keyboard.
+-  return window.matchMedia("(pointer: fine)").matches;
+-}
+-
+ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }: Props) {
+   const { t } = useI18n();
+   const { id, cwd, restored } = tab;
+@@ -44,6 +40,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
    const terminalRef = useRef<Terminal | null>(null);
    const startRef = useRef<Promise<void>>(Promise.resolve());
    const writerRef = useRef<ReturnType<typeof createTerminalWriter> | null>(null);
@@ -1794,7 +1808,7 @@ index ea6126e..9401cd3 100644
    const callbacksRef = useRef({ onClosed, onCloseError });
    callbacksRef.current = { onClosed, onCloseError };
    const [status, setStatus] = useState<"connecting" | "ready" | "exited" | "error">("connecting");
-@@ -110,6 +113,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+@@ -124,6 +121,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
      const fit = new FitAddon();
      terminal.loadAddon(fit);
      terminal.open(container);
@@ -1802,16 +1816,16 @@ index ea6126e..9401cd3 100644
      terminal.attachCustomKeyEventHandler((event) => {
        if (event.type !== "keydown") return true;
        const key = event.key.toLowerCase();
-@@ -126,6 +130,8 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+@@ -140,6 +138,8 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
        setStatus("error");
      });
      writerRef.current = writer;
 +    const themeSync = createTerminalThemeSync(terminal, themeRef.current, (next) => writer.theme(next), (reason) => setError(reason.message));
 +    themeSyncRef.current = themeSync;
      const onData = terminal.onData((data) => {
-       if (connected && !exited && !inputFailed) writer.write(applyTerminalModifiers(data, consumeModifiers()));
+       if (connected && !exited && !inputFailed && !drawingHistory) writer.write(applyTerminalModifiers(data, consumeModifiers()));
      });
-@@ -166,6 +172,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+@@ -187,6 +187,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
          } else {
            exited = true;
            connected = false;
@@ -1819,8 +1833,8 @@ index ea6126e..9401cd3 100644
            terminal.options.disableStdin = true;
            events?.close();
            setExitCode(event.type === "exit" ? event.exitCode : null);
-@@ -175,15 +182,17 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
-       events.onopen = () => {
+@@ -198,15 +199,17 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+         awaitingHistory = restored || reconnectKey > 0 || offset !== undefined;
          connected = true;
          if (inputFailed) return;
 +        themeSync.setConnected(true);
@@ -1828,7 +1842,7 @@ index ea6126e..9401cd3 100644
          setStatus("ready");
          fitAndResize();
          writer.resize(Math.max(2, terminal.cols), Math.max(2, terminal.rows));
--        if (container.offsetWidth && container.offsetHeight) terminal.focus();
+-        if (shouldAutofocusTerminal() && container.offsetWidth && container.offsetHeight) terminal.focus();
 +        if (container.offsetWidth && container.offsetHeight) focusTerminalOnDesktop(terminal);
        };
        events.onerror = () => {
@@ -1838,15 +1852,15 @@ index ea6126e..9401cd3 100644
          terminal.options.disableStdin = true;
          setStatus(events?.readyState === EventSource.CLOSED ? "error" : "connecting");
        };
-@@ -210,6 +219,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
-
+@@ -233,6 +236,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+ 
      const pageHide = () => {
        connected = false;
 +      themeSync.setConnected(false);
        terminal.options.disableStdin = true;
        events?.close();
        if (!exited && !inputFailed) setStatus("connecting");
-@@ -221,6 +231,8 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+@@ -244,6 +248,8 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
      window.addEventListener("online", connect);
      return () => {
        disposed = true;
@@ -1855,7 +1869,7 @@ index ea6126e..9401cd3 100644
        events?.close();
        void writer.stop();
        resizeObserver.disconnect();
-@@ -231,6 +243,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+@@ -254,6 +260,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
        window.removeEventListener("pageshow", pageShow);
        window.removeEventListener("offline", pageHide);
        window.removeEventListener("online", connect);
@@ -1863,27 +1877,27 @@ index ea6126e..9401cd3 100644
        terminal.dispose();
        terminalRef.current = null;
        refitRef.current = () => {};
-@@ -238,7 +251,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+@@ -261,7 +268,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
    }, [id, cwd, restored, reconnectKey, consumeModifiers]);
-
+ 
    useEffect(() => {
 -    if (terminalRef.current) terminalRef.current.options.theme = TERMINAL_XTERM_THEMES[theme];
 +    void themeSyncRef.current?.setTheme(theme);
    }, [theme]);
-
+ 
    useEffect(() => {
-@@ -250,7 +263,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
+@@ -273,7 +280,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
    }, [fontSize]);
-
+ 
    useEffect(() => {
--    if (active) terminalRef.current?.focus();
+-    if (active && shouldAutofocusTerminal()) terminalRef.current?.focus();
 +    if (active && terminalRef.current) focusTerminalOnDesktop(terminalRef.current);
    }, [active]);
-
+ 
    useEffect(() => {
 diff --git a/lib/workbot-terminal-input.ts b/lib/workbot-terminal-input.ts
 new file mode 100644
-index 0000000..00baaf9
+index 0000000..9032aa6
 --- /dev/null
 +++ b/lib/workbot-terminal-input.ts
 @@ -0,0 +1,69 @@
@@ -1958,7 +1972,7 @@ index 0000000..00baaf9
 +}
 diff --git a/lib/workbot-terminal-input.test.mjs b/lib/workbot-terminal-input.test.mjs
 new file mode 100644
-index 0000000..f7dabae
+index 0000000..76a8119
 --- /dev/null
 +++ b/lib/workbot-terminal-input.test.mjs
 @@ -0,0 +1,160 @@
@@ -2657,7 +2671,7 @@ index 0ef9f2c..8420219 100644
  import { NextResponse } from "next/server";
 -import { getTerminalCwd, killTerminal, resizeTerminal, writeTerminal } from "@/lib/terminal-manager";
 +import { getTerminalCwd, killTerminal, resizeTerminal, syncTerminalTheme, writeTerminal } from "@/lib/terminal-manager";
-
+ 
  export const dynamic = "force-dynamic";
  export const runtime = "nodejs";
 @@ -18,16 +18,24 @@ export async function POST(

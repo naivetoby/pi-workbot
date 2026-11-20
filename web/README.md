@@ -1,6 +1,6 @@
 # Web 依赖
 
-Web 使用 [agegr/pi-web](https://github.com/agegr/pi-web) `0.17.0`，源码固定到发布标签 `v0.17.0` 对应的提交 `174bff967807cdb59abb0204198d3d7cc19c862d`。上游八个 Pi 系列依赖（含 `pi-schema`）统一锁定为 `1.5.2`，与主项目一致。
+Web 使用 [agegr/pi-web](https://github.com/agegr/pi-web) `0.18.0`，源码固定到发布标签 `v0.18.0` 对应的提交 `2daa0d131eae6c2fd8c2a80872eee01ea3c7a0a1`。上游八个 Pi 系列依赖（含 `pi-schema`）统一锁定为 `1.6.0`，与主项目一致。
 
 ## 构建与运行
 

@@ -66,7 +66,7 @@ async function configureRelay(path: string): Promise<void> {
   if (!relay || typeof relay !== 'object' || !('baseUrl' in relay)) return
   if (relay.baseUrl !== '${OPENAI_RELAY_BASE_URL}') return
 
-  // Pi 1.5.2 不展开 baseUrl；只处理此模板，未配置时不启用中转，不影响其他模型。
+  // Pi 1.6.0 不展开 baseUrl；只处理此模板，未配置时不启用中转，不影响其他模型。
   const baseUrl = process.env.OPENAI_RELAY_BASE_URL?.trim()
   if (!baseUrl) {
     Reflect.deleteProperty(providers, 'openai-relay')
